@@ -5,6 +5,9 @@ docker-compose.override.yml
 # Local-only build log (per user decision 2026-05-17)
 doc.md
 
+# Phase 9 eval reports (per-run JSON; keep .gitkeep)
+eval/results/*.json
+
 # Data and runtime state
 data/
 dead_letter/
