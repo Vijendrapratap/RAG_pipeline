@@ -23,5 +23,5 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["ingestion*"]
+include = ["ingestion*", "open_webui_functions*", "services*"]
 exclude = ["tests*", "data*", "dead_letter*"]
