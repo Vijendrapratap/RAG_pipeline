@@ -1,0 +1,22 @@
+[Unit]
+Description=Tantivy BM25 search sidecar (transcript-rag)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=transcript-rag
+Group=transcript-rag
+WorkingDirectory=/opt/transcript-rag
+Environment=TANTIVY_DIR=/opt/transcript-rag/data/tantivy
+ExecStart=/opt/transcript-rag/.venv/bin/uvicorn \
+    services.tantivy_server.tantivy_server:app \
+    --host 0.0.0.0 --port 8765 \
+    --workers 1 --log-level info
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

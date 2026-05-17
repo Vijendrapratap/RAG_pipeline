@@ -258,15 +258,18 @@ class TantivyWriter:
     def commit(self) -> None:
         if not self.enabled or self.writer is None:
             return
+        # tantivy-py writer stays usable after commit() — no reopen needed.
+        # Reopening would race the GC of the prior writer for the index lock.
         self.writer.commit()
-        # writer is one-shot per commit in tantivy-py; reopen for further adds.
-        self.writer = self.index.writer(heap_size=128 * 1024 * 1024, num_threads=1)
 
     def close(self) -> None:
+        if not self.enabled or self.writer is None:
+            return
         try:
-            self.commit()
+            self.writer.commit()
         except Exception as e:
             log.error("final tantivy commit failed: %s", e)
+        self.writer = None  # drop the lock immediately
 
 
 # ---- Signal handling (PRD #10) -----------------------------------------
