@@ -212,6 +212,37 @@ class PostgresWriter:
                 pass
             self.enabled = False
 
+    def write_file_meta(
+        self,
+        source_file: str,
+        duration_sec: float | None,
+        speakers: list[str],
+        chunk_count: int,
+    ) -> None:
+        """Upsert the per-file rollup row. Called once at end of each file."""
+        if not self.enabled or not self.conn:
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO file_meta
+                         (source_file, duration_sec, speakers, chunk_count, ingested_at)
+                       VALUES (%s, %s, %s, %s, NOW())
+                       ON CONFLICT (source_file) DO UPDATE SET
+                         duration_sec = EXCLUDED.duration_sec,
+                         speakers     = EXCLUDED.speakers,
+                         chunk_count  = EXCLUDED.chunk_count,
+                         ingested_at  = NOW()""",
+                    (source_file, duration_sec, speakers, chunk_count),
+                )
+            self.conn.commit()
+        except Exception as e:
+            log.error("Postgres file_meta upsert failed: %s", e)
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+
     def close(self) -> None:
         if self.conn:
             try:
@@ -351,8 +382,10 @@ def process_file(
     pg_writer: PostgresWriter,
     batch_size: int,
     dry_run: bool,
-) -> int:
-    """Ingest one .chunks.json file. Returns number of chunks ingested."""
+) -> dict[str, Any]:
+    """Ingest one .chunks.json file. Returns a stats dict with keys:
+    n_chunks (int), source_file (str), duration_sec (float|None),
+    speakers (list[str])."""
     size = chunks_path.stat().st_size
     if size > MAX_FILE_BYTES:
         dst = quarantine(chunks_path, "oversize")
@@ -370,15 +403,25 @@ def process_file(
     chunks = data.get("chunks", [])
     if not chunks:
         log.info("%s: 0 chunks — nothing to ingest", chunks_path.name)
-        return 0
+        return {"n_chunks": 0, "source_file": source_file,
+                "duration_sec": None, "speakers": []}
 
     total = 0
+    end_secs: list[float] = []
+    speakers_seen: set[str] = set()
     for start in range(0, len(chunks), batch_size):
         if _SHUTDOWN_REQUESTED:
             raise GracefulExit()
         batch = chunks[start : start + batch_size]
         texts = [c["text"] for c in batch]
         ids = [chunk_uuid(source_file, start + i, c["text"]) for i, c in enumerate(batch)]
+
+        for c in batch:
+            es = c.get("end_sec")
+            if es is not None:
+                end_secs.append(float(es))
+            for s in (c.get("speakers") or []):
+                speakers_seen.add(s)
 
         if dry_run:
             total += len(batch)
@@ -408,7 +451,12 @@ def process_file(
             pg_writer.write_batch(pg_rows)
             total += len(points)
 
-    return total
+    return {
+        "n_chunks": total,
+        "source_file": source_file,
+        "duration_sec": max(end_secs) if end_secs else None,
+        "speakers": sorted(speakers_seen),
+    }
 
 
 # ---- main loop ---------------------------------------------------------
@@ -494,12 +542,20 @@ def main(argv: list[str] | None = None) -> int:
 
             try:
                 _install_file_alarm(FILE_TIMEOUT_SEC)
-                n = process_file(
+                stats = process_file(
                     fpath, qclient, tantivy_writer, pg_writer,
                     args.batch_size, args.dry_run,
                 )
                 _cancel_file_alarm()
+                n = stats["n_chunks"]
                 progress.mark_ok(fpath.name, n)
+                # PRD §6 Phase 6: update file_meta at the end of each file.
+                # No-op when chunk_meta schema is absent (PostgresWriter disabled).
+                if not args.dry_run:
+                    pg_writer.write_file_meta(
+                        stats["source_file"], stats["duration_sec"],
+                        stats["speakers"], n,
+                    )
                 grand_total_chunks += n
                 processed += 1
 

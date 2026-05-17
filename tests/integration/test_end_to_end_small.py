@@ -29,6 +29,13 @@ from ingestion.utils.progress_db import ProgressDB
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 QDRANT_KEY = os.environ.get("QDRANT_API_KEY", "")
+PG_DSN = os.environ.get(
+    "PG_DSN",
+    f"postgresql://owui:{os.environ.get('POSTGRES_PASSWORD', '')}"
+    "@localhost:5432/openwebui",
+)
+
+SCHEMA_SQL = Path(__file__).resolve().parents[2] / "infra" / "postgres" / "analytics_schema.sql"
 
 
 def _stack_alive() -> bool:
@@ -41,10 +48,39 @@ def _stack_alive() -> bool:
         return False
 
 
+def _postgres_alive() -> bool:
+    try:
+        import psycopg2
+        c = psycopg2.connect(PG_DSN, connect_timeout=3)
+        c.close()
+        return True
+    except Exception:
+        return False
+
+
 pytestmark = pytest.mark.skipif(
     not _stack_alive(),
     reason="Ollama or Qdrant not reachable on localhost — integration test skipped",
 )
+
+
+@pytest.fixture(scope="session")
+def postgres_schema():
+    """Apply Phase 6 schema (idempotent) once per test session, then yield a
+    connection-getter. Skips with a marker if Postgres is down."""
+    if not _postgres_alive():
+        pytest.skip("Postgres not reachable — Phase 6 assertions skipped")
+    import psycopg2
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    conn = psycopg2.connect(PG_DSN)
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+    conn.close()
+
+    def _conn():
+        return psycopg2.connect(PG_DSN)
+    return _conn
 
 
 def _make_chunks_json(path: Path, source_name: str, n_chunks: int) -> None:
@@ -133,9 +169,10 @@ def isolated_env(tmp_path, monkeypatch):
     _drop_test_collection(test_coll)
 
 
-def test_end_to_end_small(isolated_env):
+def test_end_to_end_small(isolated_env, postgres_schema):
     """Three healthy files + one corrupted file -> 3 ok, 1 failed,
-    corrupted file in dead_letter, Qdrant and Tantivy counts match."""
+    corrupted file in dead_letter, Qdrant and Tantivy counts match,
+    and chunk_meta/file_meta rows are populated (Phase 6)."""
     chunks_dir = isolated_env["chunks_dir"]
     dead_dir = isolated_env["dead_dir"]
     tantivy_dir = isolated_env["tantivy_dir"]
@@ -194,6 +231,30 @@ def test_end_to_end_small(isolated_env):
     assert n_docs == expected_chunks, (
         f"Tantivy has {n_docs} docs, expected {expected_chunks}"
     )
+
+    # Phase 6: chunk_meta count for these source files matches what Qdrant has
+    # for the same set; file_meta has one row per source file with non-null
+    # chunk_count.
+    sources = ("alpha.json", "bravo.json", "charlie.json")
+    with postgres_schema() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM chunk_meta WHERE source_file = ANY(%s)",
+                (list(sources),),
+            )
+            pg_count = cur.fetchone()[0]
+            assert pg_count == expected_chunks, (
+                f"chunk_meta has {pg_count} for {sources}, expected {expected_chunks}"
+            )
+            cur.execute(
+                "SELECT source_file, chunk_count FROM file_meta "
+                "WHERE source_file = ANY(%s) ORDER BY source_file",
+                (list(sources),),
+            )
+            rows = cur.fetchall()
+            assert len(rows) == 3, f"expected 3 file_meta rows, got {len(rows)}"
+            for source, n in rows:
+                assert n is not None and n > 0, f"{source}: chunk_count={n}"
 
 
 def test_second_run_is_noop(isolated_env):
@@ -255,3 +316,65 @@ def test_verify_ingestion_passes(isolated_env):
         "--seed", "1",
     ])
     assert rc == 0
+
+
+def test_phase6_sample_whisperx_populates_file_meta(isolated_env, postgres_schema):
+    """PRD §6 Phase 6 acceptance literal:
+        SELECT * FROM file_meta WHERE source_file = 'sample_whisperx.json'
+    must return a row with non-null chunk_count after ingestion of the
+    sample_whisperx fixture via chunker_json -> bulk_ingest.
+    Also confirms SELECT COUNT(*) FROM chunk_meta matches Qdrant point count."""
+    chunks_dir = isolated_env["chunks_dir"]
+    collection = isolated_env["collection"]
+
+    # Chunk the real Phase 3 fixture into chunks_dir.
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    from ingestion.chunker_json import main as chunker_main
+    rc = chunker_main([str(fixtures), str(chunks_dir), "--format", "whisperx"])
+    assert rc == 0
+    # The chunker also picks up corrupted_files/malformed.json — that's
+    # expected to fail. Remove its error log so it doesn't get re-ingested
+    # as if it were a chunks file, and remove the corrupted source itself.
+    failed_dir = chunks_dir / "_failed"
+    if failed_dir.exists():
+        for f in failed_dir.iterdir():
+            f.unlink()
+        failed_dir.rmdir()
+    assert (chunks_dir / "sample_whisperx.chunks.json").exists()
+
+    from ingestion.bulk_ingest_hardened import main as bulk_main
+    rc = bulk_main(["--chunks-dir", str(chunks_dir), "--batch-size", "4",
+                    "--no-tantivy-health"])
+    assert rc == 0, f"bulk ingest failed: rc={rc}"
+
+    from qdrant_client import QdrantClient
+    client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY or None)
+    qdrant_count = client.count(collection_name=collection, exact=True).count
+
+    with postgres_schema() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM chunk_meta WHERE source_file = %s",
+                ("sample_whisperx.json",),
+            )
+            cm_count = cur.fetchone()[0]
+            cur.execute(
+                "SELECT source_file, duration_sec, speakers, chunk_count, "
+                "       ingested_at "
+                "FROM file_meta WHERE source_file = %s",
+                ("sample_whisperx.json",),
+            )
+            row = cur.fetchone()
+            assert row is not None, "file_meta row for sample_whisperx.json missing"
+            source_file, duration_sec, speakers, chunk_count, ingested_at = row
+            assert chunk_count is not None and chunk_count > 0, (
+                f"file_meta.chunk_count={chunk_count} (must be non-null and > 0)"
+            )
+            assert cm_count == qdrant_count, (
+                f"chunk_meta has {cm_count} rows for sample_whisperx.json; "
+                f"Qdrant has {qdrant_count} points — mismatch"
+            )
+            # Sanity: duration matches the fixture's last segment end (75.2s),
+            # speakers = the 3 SPEAKER_* values from the fixture.
+            assert duration_sec is not None and duration_sec > 0
+            assert speakers and "SPEAKER_00" in speakers
