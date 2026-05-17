@@ -47,6 +47,20 @@ Scripts under `scripts/` are added incrementally per phase.
 | Disk (indices) | ~3 TB | + your source transcripts |
 | Docker | Compose v2 | + NVIDIA Container Toolkit |
 
+## Prerequisites
+
+- **Docker Engine + Compose v2.** On Windows, use Docker Desktop with WSL2
+  integration enabled for your Ubuntu distro (Settings → Resources → WSL
+  Integration).
+- **NVIDIA Container Toolkit (`nvidia-ctk`).** Required for the `ollama` and
+  `reranker` services, which reserve GPU devices in `docker-compose.yml`. Verify
+  with `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`
+  before bringing up the stack. Install instructions:
+  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+- **NVIDIA driver visible to WSL2.** Run `nvidia-smi` inside your WSL distro
+  before Phase 1; if it errors, update the host NVIDIA driver on Windows so
+  `/dev/dxg` is exposed.
+
 ## License notes
 
 All components are open-source (MIT / Apache-2.0 / BSD / similar). License

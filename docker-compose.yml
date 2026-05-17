@@ -1,0 +1,101 @@
+version: '3.9'
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    depends_on: [ollama, qdrant, postgres, redis, reranker]
+    ports: ["8080:8080"]
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    environment:
+      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"
+      ENV: prod
+      DATABASE_URL: "postgresql://owui:${POSTGRES_PASSWORD}@postgres:5432/openwebui"
+      REDIS_URL: "redis://redis:6379/0"
+      ENABLE_BASE_MODELS_CACHE: "True"
+      ENABLE_REALTIME_CHAT_SAVE: "False"
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      VECTOR_DB: "qdrant"
+      QDRANT_URI: "http://qdrant:6333"
+      QDRANT_API_KEY: "${QDRANT_API_KEY}"
+      RAG_EMBEDDING_ENGINE: "ollama"
+      RAG_EMBEDDING_MODEL: "bge-m3"
+      RAG_OLLAMA_BASE_URL: "http://ollama:11434"
+      RAG_EMBEDDING_BATCH_SIZE: "32"
+      ENABLE_RAG_HYBRID_SEARCH: "true"
+      RAG_RERANKING_ENGINE: "external"
+      RAG_EXTERNAL_RERANKER_URL: "http://reranker:7997/rerank"
+      RAG_RERANKING_MODEL: "BAAI/bge-reranker-v2-m3"
+      RAG_TOP_K: "40"
+      RAG_TOP_K_RERANKER: "8"
+      RAG_HYBRID_BM25_WEIGHT: "0.65"
+      RAG_TEXT_SPLITTER: "token"
+      CHUNK_SIZE: "600"
+      CHUNK_OVERLAP: "150"
+      CHUNK_MIN_SIZE_TARGET: "350"
+      RAG_SYSTEM_CONTEXT: "True"
+      RAG_FILE_MAX_SIZE: "1000"
+      RAG_FILE_MAX_COUNT: "100"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports: ["11434:11434"]
+    volumes: [./data/ollama:/root/.ollama]
+    environment:
+      OLLAMA_KEEP_ALIVE: "10m"
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_FLASH_ATTENTION: "1"
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports: ["6333:6333", "6334:6334"]
+    volumes: [./data/qdrant:/qdrant/storage]
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
+      QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER: "4"
+
+  reranker:
+    image: michaelf34/infinity:latest
+    container_name: reranker
+    restart: unless-stopped
+    ports: ["7997:7997"]
+    command: >
+      v2
+      --model-id BAAI/bge-reranker-v2-m3
+      --port 7997
+      --engine torch
+      --batch-size 32
+    volumes: [./data/infinity-cache:/app/.cache]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: owui
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: openwebui
+    volumes: [./data/postgres:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: redis-server --maxclients 10000 --timeout 1800
+    volumes: [./data/redis:/data]
