@@ -191,6 +191,15 @@ class PostgresWriter:
             self.conn = None
 
     def write_batch(self, rows: list[tuple[Any, ...]]) -> None:
+        """Insert chunk_meta rows. Row tuple layout (Phase 12):
+            (chunk_id, source_file, speakers, start_sec, end_sec, word_count,
+             text, session_date, track_type, track_title, location, event_id,
+             season)
+        Phase 6 schema columns are listed first; Phase 12 columns appended.
+        Schema migration in analytics_schema.sql adds the Phase 12 columns
+        with ADD COLUMN IF NOT EXISTS so a stale DB still accepts the wider
+        INSERT — Postgres lets you target a column list that matches.
+        """
         if not self.enabled or not self.conn:
             return
         try:
@@ -198,8 +207,11 @@ class PostgresWriter:
                 cur.executemany(
                     """INSERT INTO chunk_meta
                          (chunk_id, source_file, speakers, start_sec, end_sec,
-                          word_count, text)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                          word_count, text,
+                          session_date, track_type, track_title, location,
+                          event_id, season)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s,
+                               %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (chunk_id) DO NOTHING""",
                     rows,
                 )
@@ -218,22 +230,37 @@ class PostgresWriter:
         duration_sec: float | None,
         speakers: list[str],
         chunk_count: int,
+        path_meta: dict[str, Any] | None = None,
     ) -> None:
-        """Upsert the per-file rollup row. Called once at end of each file."""
+        """Upsert the per-file rollup row. Called once at end of each file.
+        Phase 12 adds session_date / track_type / location / event_id /
+        season for filterable analytics rollups."""
         if not self.enabled or not self.conn:
             return
+        pm = path_meta or {}
         try:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO file_meta
-                         (source_file, duration_sec, speakers, chunk_count, ingested_at)
-                       VALUES (%s, %s, %s, %s, NOW())
+                         (source_file, duration_sec, speakers, chunk_count,
+                          session_date, track_type, location, event_id, season,
+                          ingested_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                        ON CONFLICT (source_file) DO UPDATE SET
                          duration_sec = EXCLUDED.duration_sec,
                          speakers     = EXCLUDED.speakers,
                          chunk_count  = EXCLUDED.chunk_count,
+                         session_date = EXCLUDED.session_date,
+                         track_type   = EXCLUDED.track_type,
+                         location     = EXCLUDED.location,
+                         event_id     = EXCLUDED.event_id,
+                         season       = EXCLUDED.season,
                          ingested_at  = NOW()""",
-                    (source_file, duration_sec, speakers, chunk_count),
+                    (
+                        source_file, duration_sec, speakers, chunk_count,
+                        pm.get("session_date"), pm.get("track_type"),
+                        pm.get("location"), pm.get("event_id"), pm.get("season"),
+                    ),
                 )
             self.conn.commit()
         except Exception as e:
@@ -362,9 +389,22 @@ def quarantine(file_path: Path, reason: str) -> Path:
 # ---- per-file processing -----------------------------------------------
 
 
+# Fields lifted from chunk["path_metadata"] (when present) into the flat
+# Qdrant payload. Listing them explicitly makes the indexed fields obvious
+# and matches the payload-index list in infra/qdrant/qdrant_setup.py.
+# Per PRD §6 Phase 12.
+_PATH_FIELDS = (
+    "collection", "year", "event_seq", "event_id", "location",
+    "event_start", "event_end",
+    "session_date", "session_seq", "session_time",
+    "track_no", "track_title", "track_type",
+    "season", "primary_speaker",
+)
+
+
 def _coerce_payload(chunk: dict[str, Any], source_file: str) -> dict[str, Any]:
     """Build the Qdrant payload from a chunker output chunk."""
-    return {
+    payload: dict[str, Any] = {
         "text": chunk["text"],
         "source_file": chunk.get("source_file", source_file),
         "speakers": chunk.get("speakers", []) or [],
@@ -373,6 +413,14 @@ def _coerce_payload(chunk: dict[str, Any], source_file: str) -> dict[str, Any]:
         "word_count": chunk.get("word_count"),
         "has_timestamps": chunk.get("has_timestamps", True),
     }
+    # Phase 12: flatten path metadata into the payload so Qdrant can filter
+    # on session_date / track_type / location / event_id / season at search
+    # time. Absent path_metadata leaves the payload unchanged (backcompat).
+    pm = chunk.get("path_metadata") or {}
+    for k in _PATH_FIELDS:
+        if k in pm and pm[k] is not None:
+            payload[k] = pm[k]
+    return payload
 
 
 def process_file(
@@ -404,11 +452,19 @@ def process_file(
     if not chunks:
         log.info("%s: 0 chunks — nothing to ingest", chunks_path.name)
         return {"n_chunks": 0, "source_file": source_file,
-                "duration_sec": None, "speakers": []}
+                "duration_sec": None, "speakers": [], "path_metadata": None}
 
     total = 0
     end_secs: list[float] = []
     speakers_seen: set[str] = set()
+    # Phase 12: capture path metadata from the first chunk that has it; all
+    # chunks in a file share the same path so we don't need a reducer.
+    file_path_meta: dict[str, Any] | None = None
+    for c in chunks:
+        if c.get("path_metadata"):
+            file_path_meta = c["path_metadata"]
+            break
+
     for start in range(0, len(chunks), batch_size):
         if _SHUTDOWN_REQUESTED:
             raise GracefulExit()
@@ -442,6 +498,12 @@ def process_file(
                 cid, source_file, payload["speakers"],
                 payload["start_sec"], payload["end_sec"],
                 payload["word_count"], payload["text"],
+                payload.get("session_date"),
+                payload.get("track_type"),
+                payload.get("track_title"),
+                payload.get("location"),
+                payload.get("event_id"),
+                payload.get("season"),
             ))
 
         if points:
@@ -456,6 +518,7 @@ def process_file(
         "source_file": source_file,
         "duration_sec": max(end_secs) if end_secs else None,
         "speakers": sorted(speakers_seen),
+        "path_metadata": file_path_meta,
     }
 
 
@@ -555,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
                     pg_writer.write_file_meta(
                         stats["source_file"], stats["duration_sec"],
                         stats["speakers"], n,
+                        path_meta=stats.get("path_metadata"),
                     )
                 grand_total_chunks += n
                 processed += 1

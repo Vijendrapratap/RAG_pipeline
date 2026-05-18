@@ -102,13 +102,37 @@ class Tools:
         vec: list[float],
         speaker: str | None,
         source_file: str | None,
+        *,
+        date_range: tuple[str, str] | None = None,
+        season: str | None = None,
+        track_type: list[str] | str | None = None,
+        location: str | None = None,
+        event_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Qdrant ANN search. Returns list of {id, score, payload}."""
+        """Qdrant ANN search. Returns list of {id, score, payload}.
+
+        Phase 12 adds path-metadata filters (date_range, season, track_type,
+        location, event_id). All are AND-combined with the existing
+        speaker/source_file filters via Qdrant's must clause.
+        """
         must: list[dict[str, Any]] = []
         if speaker:
             must.append({"key": "speakers", "match": {"value": speaker}})
         if source_file:
             must.append({"key": "source_file", "match": {"value": source_file}})
+        if location:
+            must.append({"key": "location", "match": {"value": location.upper()}})
+        if event_id:
+            must.append({"key": "event_id", "match": {"value": event_id}})
+        if season:
+            must.append({"key": "season", "match": {"value": season}})
+        if track_type:
+            tt = [track_type] if isinstance(track_type, str) else list(track_type)
+            must.append({"key": "track_type", "match": {"any": tt}})
+        if date_range:
+            gte, lte = date_range
+            must.append({"key": "session_date", "range": {"gte": gte, "lte": lte}})
+
         body: dict[str, Any] = {
             "vector": vec,
             "limit": self.valves.candidates_per_source,
@@ -236,6 +260,23 @@ class Tools:
             spk = ", ".join(speakers) if speakers else "unknown"
             out.append(f"--- Result {i} (score: {score:.3f}) ---")
             out.append(f"Source: {source} | {ts} | Speakers: {spk}")
+            # Phase 12 metadata line — only printed when at least one field
+            # is present. Lets the LLM cite event/date/track naturally.
+            meta_bits: list[str] = []
+            if pl.get("event_id"):
+                meta_bits.append(f"Event: {pl['event_id']}")
+            elif pl.get("location"):
+                meta_bits.append(f"Location: {pl['location']}")
+            if pl.get("session_date"):
+                meta_bits.append(f"Date: {pl['session_date']}")
+            if pl.get("track_title"):
+                meta_bits.append(f"Track: {pl['track_title']}")
+            if pl.get("track_type"):
+                meta_bits.append(f"Type: {pl['track_type']}")
+            if pl.get("season"):
+                meta_bits.append(f"Season: {pl['season']}")
+            if meta_bits:
+                out.append(" | ".join(meta_bits))
             out.append(pl.get("text", ""))
             out.append("")  # blank line separator
         return "\n".join(out).rstrip() + "\n"
@@ -248,8 +289,16 @@ class Tools:
         speaker: str | None = None,
         source_file: str | None = None,
         top_k: int = 8,
+        *,
+        date_range: tuple[str, str] | None = None,
+        season: str | None = None,
+        track_type: list[str] | str | None = None,
+        location: str | None = None,
+        event_id: str | None = None,
     ) -> str:
-        """Hybrid semantic + BM25 search over transcripts.
+        """Hybrid semantic + BM25 search over transcripts, with optional
+        metadata filters extracted from the source folder hierarchy
+        (PRD §6 Phase 12).
 
         Use this when the user asks about a topic, theme, or concept ("what
         did we discuss about latency?", "find content about the new dashboard").
@@ -258,31 +307,83 @@ class Tools:
         :param query: Natural-language question or topic. Example:
             "discussion of organizational changes in Q3 planning".
         :param speaker: Optional. If provided, restrict to chunks containing
-            this speaker label (e.g. "SPEAKER_00"). Useful for "what did X
-            say about Y" questions.
+            this speaker label (e.g. "Swami ji", "SPEAKER_00").
         :param source_file: Optional. Restrict to a specific transcript
-            filename (e.g. "2024_03_15_quarterly_review.json").
+            filename (e.g. "04 PRAVACHAN.json").
         :param top_k: Number of final results after reranking (default 8;
-            falls back to valves.final_top_k if higher).
+            capped at valves.final_top_k).
+        :param date_range: Optional (start_iso, end_iso) date pair, e.g.
+            ("2010-01-01", "2010-12-31"). Restricts to chunks whose
+            session_date falls in the range, inclusive.
+        :param season: Optional. One of "winter" (Jan-Feb), "summer"
+            (Mar-May), "monsoon" (Jun-Sep), "post-monsoon" (Oct-Dec).
+            Use for queries like "what did Swami ji say on a monsoon day"
+            — pass season="monsoon".
+        :param track_type: Optional. One of "discourse" (PRAVACHAN),
+            "address" (SAMBODHAN), "meditation", "invocation", "music",
+            "bhajan". Pass a single string or a list. Recommended default
+            for teaching queries: ["discourse", "address"] to exclude
+            bhajans, music, and meditation tracks.
+        :param location: Optional location/city label, e.g. "NOIDA",
+            "RISHIKESH". Case-insensitive on the caller side; folded to
+            uppercase before the filter.
+        :param event_id: Optional event folder name, e.g.
+            "01 NOIDA 7 - 10 JAN 2010". Pin to a specific camp/event.
         :return: Formatted text with one block per result, including source
             file, timestamps, speakers, BM25/dense fused + reranked score,
             and the chunk text. Citations are surfaced in the chat UI.
 
-        Example user query: "what did we say about the platform team launch?"
+        Example queries this enables:
+        - "What did Swami ji say on a monsoon day about barsat?"
+            → season="monsoon", track_type=["discourse", "address"]
+        - "Find discourses from the Noida camp in January 2010"
+            → location="NOIDA", date_range=("2010-01-01", "2010-01-31"),
+              track_type="discourse"
+        - "What did he say at the morning sessions?"
+            → (no folder-time filter yet — that would be a future field)
         """
         # Allow caller to dial top_k down per-call; cap at valves to keep
         # rerank batch reasonable.
         effective_top_k = min(top_k, self.valves.final_top_k)
         vec = self._embed(query)
-        dense = self._dense(vec, speaker, source_file)
+        dense = self._dense(
+            vec, speaker, source_file,
+            date_range=date_range, season=season, track_type=track_type,
+            location=location, event_id=event_id,
+        )
         bm25 = self._bm25(query)
         fused = self._rrf(dense, bm25, self.valves.bm25_weight)
-        # Optional post-fusion filter when only BM25 hits would otherwise
-        # leak through ignoring the filter args.
-        if speaker or source_file:
-            fused = [(c, s, pl) for c, s, pl in fused
-                     if (not speaker or speaker in (pl.get("speakers") or []))
-                     and (not source_file or pl.get("source_file") == source_file)]
+        # Post-fusion filter: BM25-only hits don't carry payload metadata,
+        # so any Phase 12 filter that's set is enforced here against the
+        # dense-side payloads we do have. BM25-only hits without payload
+        # are dropped when a metadata filter is active (consistent with
+        # the user's intent — they asked for a filtered subset).
+        if (speaker or source_file or season or track_type
+                or location or event_id or date_range):
+            tt_set: set[str] | None = None
+            if track_type:
+                tt_set = {track_type} if isinstance(track_type, str) else set(track_type)
+            filtered: list[tuple[str, float, dict[str, Any]]] = []
+            for c, s, pl in fused:
+                if speaker and speaker not in (pl.get("speakers") or []):
+                    continue
+                if source_file and pl.get("source_file") != source_file:
+                    continue
+                if season and pl.get("season") != season:
+                    continue
+                if tt_set is not None and pl.get("track_type") not in tt_set:
+                    continue
+                if location and (pl.get("location") or "").upper() != location.upper():
+                    continue
+                if event_id and pl.get("event_id") != event_id:
+                    continue
+                if date_range and pl.get("session_date"):
+                    gte, lte = date_range
+                    sd = pl.get("session_date")
+                    if not (gte <= sd <= lte):
+                        continue
+                filtered.append((c, s, pl))
+            fused = filtered
         reranked = self._rerank(query, fused[: self.valves.candidates_per_source])
         return self._format(reranked[:effective_top_k])
 

@@ -29,12 +29,25 @@ def main():
         )
         print(f"✅ Created collection {COLLECTION!r}")
 
-    # Idempotent payload indexes
+    # Idempotent payload indexes.
+    # Phase 6 fields: source_file, speakers, start_sec, date.
+    # Phase 12 adds: session_date, track_type, location, event_id, season,
+    # year, primary_speaker — to support the filter-aware retrieval queries
+    # the LLM will issue ("monsoon day", "Noida camp", discourses-only, etc.).
     for field, schema in [
-        ("source_file", PayloadSchemaType.KEYWORD),
-        ("speakers",    PayloadSchemaType.KEYWORD),
-        ("start_sec",   PayloadSchemaType.FLOAT),
-        ("date",        PayloadSchemaType.DATETIME),
+        # --- Phase 6 ---
+        ("source_file",     PayloadSchemaType.KEYWORD),
+        ("speakers",        PayloadSchemaType.KEYWORD),
+        ("start_sec",       PayloadSchemaType.FLOAT),
+        ("date",            PayloadSchemaType.DATETIME),
+        # --- Phase 12 ---
+        ("session_date",    PayloadSchemaType.DATETIME),
+        ("track_type",      PayloadSchemaType.KEYWORD),
+        ("location",        PayloadSchemaType.KEYWORD),
+        ("event_id",        PayloadSchemaType.KEYWORD),
+        ("season",          PayloadSchemaType.KEYWORD),
+        ("year",            PayloadSchemaType.INTEGER),
+        ("primary_speaker", PayloadSchemaType.KEYWORD),
     ]:
         try:
             client.create_payload_index(COLLECTION, field, schema)

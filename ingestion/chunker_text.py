@@ -17,10 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 import traceback
 from pathlib import Path
+
+from ingestion.utils.path_parser import PRIMARY_SPEAKER, PathMetadata, parse_path
 
 TARGET_TOKENS = 450
 MAX_TOKENS = 700
@@ -64,31 +67,52 @@ def split_sentences(text: str) -> list[str]:
 
 
 def _build_chunk(
-    sentences: list[str], idx_start: int, source_name: str
+    sentences: list[str],
+    idx_start: int,
+    source_name: str,
+    path_meta: PathMetadata | None = None,
 ) -> dict[str, object]:
     body = " ".join(sentences).strip()
     idx_end = idx_start + len(sentences) - 1
-    header = (
+    base = (
         f"[Source: {source_name} | Approx position: sentences "
         f"{idx_start}-{idx_end} | "
         f"NOTE: plain-text source, timestamps unavailable]"
     )
+    # Embedding model sees the header verbatim — prepending parsed path
+    # metadata (event/date/track/season) is a free precision boost for
+    # filter-aware semantic queries. Phase 12.
+    extra = path_meta.header_fragment() if path_meta else ""
+    header = f"[{extra}]\n{base}" if extra else base
     full_text = f"{header}\n{body}"
-    return {
+
+    # speakers defaults to [PRIMARY_SPEAKER] when path metadata is present
+    # so existing speaker filters work. Per PRD §6 Phase 12 / user
+    # confirmation: every transcript in this corpus is Swami ji's voice.
+    speakers = [PRIMARY_SPEAKER] if path_meta else []
+
+    chunk: dict[str, object] = {
         "text": full_text,
         "source_file": source_name,
         "start_sec": None,
         "end_sec": None,
-        "speakers": [],
+        "speakers": speakers,
         "format": "text",
         "has_timestamps": False,
         "word_count": len(body.split()),
         "sentence_start": idx_start,
         "sentence_end": idx_end,
     }
+    if path_meta is not None:
+        chunk["path_metadata"] = path_meta.to_payload()
+    return chunk
 
 
-def chunk_sentences(sentences: list[str], source_name: str) -> list[dict[str, object]]:
+def chunk_sentences(
+    sentences: list[str],
+    source_name: str,
+    path_meta: PathMetadata | None = None,
+) -> list[dict[str, object]]:
     """Walk sentences left to right, emitting chunks of ~TARGET tokens with
     2-sentence overlap. Hard cap at MAX (mid-sentence boundaries never split
     sentences; a single oversize sentence becomes its own chunk)."""
@@ -116,7 +140,7 @@ def chunk_sentences(sentences: list[str], source_name: str) -> list[dict[str, ob
                 break
         if not buf:
             break
-        chunks.append(_build_chunk(buf, chunk_start, source_name))
+        chunks.append(_build_chunk(buf, chunk_start, source_name, path_meta))
         # Overlap: rewind by OVERLAP_SENTENCES so the next chunk starts with
         # the last N sentences. Skip overlap if it would prevent forward
         # progress (oversize single sentence already consumed).
@@ -125,7 +149,28 @@ def chunk_sentences(sentences: list[str], source_name: str) -> list[dict[str, ob
     return chunks
 
 
-def process_file(in_path: Path, out_dir: Path, failed_dir: Path) -> tuple[int, str]:
+def _path_meta_for(in_path: Path, base_dir: Path | None) -> PathMetadata | None:
+    """Wrap parse_path with a try/except so a parser bug never kills the
+    chunker. Logs warnings collected during parsing per CLAUDE.md rule 6."""
+    if base_dir is None and not os.environ.get("RAW_TRANSCRIPTS_BASE_DIR"):
+        return None
+    bd = base_dir or Path(os.environ["RAW_TRANSCRIPTS_BASE_DIR"])
+    try:
+        meta = parse_path(in_path, base_dir=bd)
+    except Exception as e:  # pragma: no cover — parser contract is no-raise
+        log.error("path_parser raised on %s: %s", in_path, e)
+        return None
+    for w in meta.parse_warnings:
+        log.warning("path_parse %s: %s", in_path.name, w)
+    return meta
+
+
+def process_file(
+    in_path: Path,
+    out_dir: Path,
+    failed_dir: Path,
+    base_dir: Path | None = None,
+) -> tuple[int, str]:
     size = in_path.stat().st_size
     if size > MAX_FILE_BYTES:
         log.warning("%s: %.1f MB exceeds %d MB cap — skipping", in_path, size / 1e6,
@@ -135,7 +180,8 @@ def process_file(in_path: Path, out_dir: Path, failed_dir: Path) -> tuple[int, s
         out_dir.mkdir(parents=True, exist_ok=True)
         text = read_text(in_path)
         sentences = split_sentences(text)
-        chunks = chunk_sentences(sentences, in_path.name)
+        path_meta = _path_meta_for(in_path, base_dir)
+        chunks = chunk_sentences(sentences, in_path.name, path_meta)
         out_path = out_dir / f"{in_path.stem}.chunks.json"
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(
@@ -184,11 +230,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("input_dir", nargs="?", default=None,
                    help="Directory of input .txt files. Omit to read one document from stdin.")
     p.add_argument("output_dir", help="Directory for .chunks.json output.")
+    p.add_argument("--base-dir", default=None,
+                   help="Root above the audio folder hierarchy. When set, "
+                        "every file's path is parsed for metadata (event, date, "
+                        "track type, season) per PRD §6 Phase 12. Falls back to "
+                        "RAW_TRANSCRIPTS_BASE_DIR env var; omit both to skip.")
+    p.add_argument("--recursive", "-r", action="store_true",
+                   help="Walk input_dir recursively (needed for the nested "
+                        "audio folder layout that Phase 12 parses).")
     args = p.parse_args(argv)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     failed_dir = out_dir / "_failed"
+    base_dir = Path(args.base_dir) if args.base_dir else None
 
     totals = {"files": 0, "chunks": 0, "failed": 0, "skipped": 0}
 
@@ -202,9 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         if not in_dir.is_dir():
             log.error("input_dir does not exist or is not a directory: %s", in_dir)
             return 2
-        for f in sorted(in_dir.glob("*.txt")):
+        files = sorted(in_dir.rglob("*.txt") if args.recursive else in_dir.glob("*.txt"))
+        for f in files:
             totals["files"] += 1
-            n, status = process_file(f, out_dir, failed_dir)
+            n, status = process_file(f, out_dir, failed_dir, base_dir=base_dir)
             totals["chunks"] += n
             if status == "failed":
                 totals["failed"] += 1

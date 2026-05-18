@@ -15,10 +15,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import traceback
 from pathlib import Path
 from typing import Any, Iterable
+
+from ingestion.utils.path_parser import PRIMARY_SPEAKER, PathMetadata, parse_path
 
 TARGET_TOKENS = 450
 MAX_TOKENS = 700
@@ -83,7 +86,12 @@ def normalize_segments(data: Any, fmt: str) -> list[dict[str, Any]]:
     return out
 
 
-def _flush(buf: list[dict[str, Any]], source_name: str, fmt: str) -> dict[str, Any] | None:
+def _flush(
+    buf: list[dict[str, Any]],
+    source_name: str,
+    fmt: str,
+    path_meta: PathMetadata | None = None,
+) -> dict[str, Any] | None:
     """Materialize one chunk from buffered segments. Returns None if empty."""
     if not buf:
         return None
@@ -93,15 +101,22 @@ def _flush(buf: list[dict[str, Any]], source_name: str, fmt: str) -> dict[str, A
     starts = [s["start"] for s in buf if s["start"] is not None]
     ends = [s["end"] for s in buf if s["end"] is not None]
     speakers = sorted({s["speaker"] for s in buf if s["speaker"]})
+    # Per PRD §6 Phase 12: every file in this corpus is Swami ji's voice.
+    # If diarization produced no labels, fall back to PRIMARY_SPEAKER so
+    # speaker-based filters still match.
+    if not speakers and path_meta is not None:
+        speakers = [PRIMARY_SPEAKER]
     start_sec = min(starts) if starts else None
     end_sec = max(ends) if ends else None
     speakers_label = ", ".join(speakers) if speakers else "unknown"
-    header = (
+    base = (
         f"[Source: {source_name} | {fmt_hms(start_sec)} -> {fmt_hms(end_sec)} "
         f"| Speakers: {speakers_label}]"
     )
+    extra = path_meta.header_fragment() if path_meta else ""
+    header = f"[{extra}]\n{base}" if extra else base
     full_text = f"{header}\n{text_body}"
-    return {
+    chunk: dict[str, Any] = {
         "text": full_text,
         "source_file": source_name,
         "start_sec": start_sec,
@@ -111,10 +126,16 @@ def _flush(buf: list[dict[str, Any]], source_name: str, fmt: str) -> dict[str, A
         "has_timestamps": True,
         "word_count": len(text_body.split()),
     }
+    if path_meta is not None:
+        chunk["path_metadata"] = path_meta.to_payload()
+    return chunk
 
 
 def chunk_segments(
-    segments: Iterable[dict[str, Any]], source_name: str, fmt: str
+    segments: Iterable[dict[str, Any]],
+    source_name: str,
+    fmt: str,
+    path_meta: PathMetadata | None = None,
 ) -> list[dict[str, Any]]:
     """Walk segments, flushing on size/speaker boundaries per PRD spec."""
     chunks: list[dict[str, Any]] = []
@@ -129,7 +150,7 @@ def chunk_segments(
         # Hard cap: flush before adding if this segment would push past MAX
         # and we already have at least MIN tokens accumulated.
         if buf_tokens + seg_tokens > MAX_TOKENS and buf_tokens >= MIN_TOKENS:
-            chunk = _flush(buf, source_name, fmt)
+            chunk = _flush(buf, source_name, fmt, path_meta)
             if chunk:
                 chunks.append(chunk)
             buf = []
@@ -146,7 +167,7 @@ def chunk_segments(
             and buf_speakers
             and spk not in buf_speakers
         ):
-            chunk = _flush(buf, source_name, fmt)
+            chunk = _flush(buf, source_name, fmt, path_meta)
             if chunk:
                 chunks.append(chunk)
             buf = []
@@ -160,7 +181,7 @@ def chunk_segments(
 
         # Pathological single segment > MAX_TOKENS: emit on its own.
         if buf_tokens >= MAX_TOKENS:
-            chunk = _flush(buf, source_name, fmt)
+            chunk = _flush(buf, source_name, fmt, path_meta)
             if chunk:
                 chunks.append(chunk)
             buf = []
@@ -175,8 +196,28 @@ def chunk_segments(
     return chunks
 
 
+def _path_meta_for(in_path: Path, base_dir: Path | None) -> PathMetadata | None:
+    """Wrap parse_path with a try/except so a parser bug never kills the
+    chunker. Logs warnings collected during parsing per CLAUDE.md rule 6."""
+    if base_dir is None and not os.environ.get("RAW_TRANSCRIPTS_BASE_DIR"):
+        return None
+    bd = base_dir or Path(os.environ["RAW_TRANSCRIPTS_BASE_DIR"])
+    try:
+        meta = parse_path(in_path, base_dir=bd)
+    except Exception as e:  # pragma: no cover — parser contract is no-raise
+        log.error("path_parser raised on %s: %s", in_path, e)
+        return None
+    for w in meta.parse_warnings:
+        log.warning("path_parse %s: %s", in_path.name, w)
+    return meta
+
+
 def process_file(
-    in_path: Path, out_dir: Path, fmt: str, failed_dir: Path
+    in_path: Path,
+    out_dir: Path,
+    fmt: str,
+    failed_dir: Path,
+    base_dir: Path | None = None,
 ) -> tuple[int, str]:
     """Returns (n_chunks, status). status in {'ok','skipped','failed'}."""
     size = in_path.stat().st_size
@@ -189,7 +230,8 @@ def process_file(
         with in_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         segs = normalize_segments(data, fmt)
-        chunks = chunk_segments(segs, in_path.name, fmt)
+        path_meta = _path_meta_for(in_path, base_dir)
+        chunks = chunk_segments(segs, in_path.name, fmt, path_meta)
         out_path = out_dir / f"{in_path.stem}.chunks.json"
         with out_path.open("w", encoding="utf-8") as f:
             json.dump({"source_file": in_path.name, "format": fmt, "chunks": chunks},
@@ -236,11 +278,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("output_dir", help="Directory for .chunks.json output.")
     p.add_argument("--format", choices=("whisperx", "whisper"), default="whisperx",
                    help="Input format. whisperx has speaker diarization; whisper does not.")
+    p.add_argument("--base-dir", default=None,
+                   help="Root above the audio folder hierarchy. When set, "
+                        "every file's path is parsed for metadata (event, date, "
+                        "track type, season) per PRD §6 Phase 12. Falls back to "
+                        "RAW_TRANSCRIPTS_BASE_DIR env var; omit both to skip.")
+    p.add_argument("--recursive", "-r", action="store_true",
+                   help="Walk input_dir recursively (needed for the nested "
+                        "audio folder layout that Phase 12 parses).")
     args = p.parse_args(argv)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     failed_dir = out_dir / "_failed"
+    base_dir = Path(args.base_dir) if args.base_dir else None
 
     totals = {"files": 0, "chunks": 0, "failed": 0, "skipped": 0}
 
@@ -254,9 +305,10 @@ def main(argv: list[str] | None = None) -> int:
         if not in_dir.is_dir():
             log.error("input_dir does not exist or is not a directory: %s", in_dir)
             return 2
-        for f in sorted(in_dir.glob("*.json")):
+        files = sorted(in_dir.rglob("*.json") if args.recursive else in_dir.glob("*.json"))
+        for f in files:
             totals["files"] += 1
-            n, status = process_file(f, out_dir, args.format, failed_dir)
+            n, status = process_file(f, out_dir, args.format, failed_dir, base_dir=base_dir)
             totals["chunks"] += n
             if status == "failed":
                 totals["failed"] += 1

@@ -938,6 +938,107 @@ python -m eval.run_eval --queries eval/golden_queries.yaml
 
 ---
 
+### Phase 12 — Path-based metadata extraction
+
+**Objective:** Extract structured metadata from the source-audio folder
+hierarchy (collection, year, event, location, session date/time, track type)
+and propagate it through chunks → Qdrant payloads → Postgres rows → retrieval
+filters. Enables queries like *"what did Swami ji say on a monsoon day about
+barsat?"* and *"show me discourses from the Noida camp"* — temporal,
+locational, and track-type filtering on top of the existing hybrid retrieval.
+
+**Trigger:** post-Phase-11 user request after corpus inspection revealed that
+every audio file's full path encodes rich metadata (e.g.
+`Live Masters 2010\01 NOIDA 7 - 10 JAN 2010\7 JAN - 1$ - 6 PM\04 PRAVACHAN`).
+A path parser captures all of it with zero ML overhead.
+
+**Locked design decisions:**
+
+| Decision | Choice |
+|---|---|
+| Season mapping | IMD-standard 4-season — winter (Jan–Feb), summer (Mar–May), monsoon (Jun–Sep), post-monsoon (Oct–Dec) |
+| Primary speaker | Constant `"Swami ji"` (renameable in `path_parser.py`); single voice across the corpus |
+| Default track-type filter on retrieval | `{discourse, address}` — i.e. PRAVACHAN + SAMBODHAN — for teaching queries; bhajan/music/meditation/invocation searchable but excluded unless the LLM passes them |
+| Parse failures | Logged to `path_parse_failures.log`; ingestion proceeds with whatever partial fields parsed (degrade > drop) |
+| Track-type vocab | `PRAVACHAN→discourse`, `SAMBODHAN→address`, `MEDITATION→meditation`, `OM GURUVE NAMAH→invocation`, `ENTRY MUSIC`/`RETURN MUSIC→music`, default `→bhajan` |
+
+**Deliverables:**
+
+`ingestion/utils/path_parser.py` — pure function module:
+- `parse_path(path: Path, base_dir: Path | None = None) -> PathMetadata`
+- `PathMetadata` dataclass with fields: `collection`, `year`, `event_seq`,
+  `event_id`, `location`, `event_start`, `event_end`, `session_date`,
+  `session_seq`, `session_time`, `track_no`, `track_title`, `track_type`,
+  `season`, `primary_speaker`, `parse_warnings: list[str]`
+- `season_for(date: date) -> str` helper
+- `track_type_for(title: str) -> str` lookup with `bhajan` default
+- `PRIMARY_SPEAKER: str = "Swami ji"` module constant
+- Graceful per-level parsing: a malformed event folder still yields a
+  valid `PathMetadata` with `event_id=None` and a warning appended
+
+`tests/unit/test_path_parser.py` — covers:
+- The exact example path from the trigger
+- Each track-type vocab token + bhajan default
+- Each season boundary month
+- Malformed inputs at every level (missing year, missing date, etc.)
+- Idempotent re-parsing of the same path
+
+`ingestion/chunker_text.py` + `chunker_json.py`:
+- Accept optional `--base-dir` CLI arg (or env `RAW_TRANSCRIPTS_BASE_DIR`)
+- For each input file, call `parse_path()` and embed the parsed fields
+  into every chunk's metadata + into the chunk header line (so the
+  embedding model itself sees `[Event: NOIDA 7 JAN 2010 | Track: PRAVACHAN]`)
+- Backwards-compatible: when `base_dir` is absent, parser yields all-None
+  metadata and the chunkers behave exactly as before
+
+`ingestion/bulk_ingest_hardened.py`:
+- Pass parsed metadata through `_coerce_payload()` into Qdrant payload
+- Insert into Postgres `chunk_meta` and `file_meta` with the new columns
+
+`infra/qdrant/qdrant_setup.py`:
+- Add idempotent payload indexes: `session_date` (DATETIME), `track_type`
+  (KEYWORD), `location` (KEYWORD), `event_id` (KEYWORD), `season` (KEYWORD)
+
+`infra/postgres/analytics_schema.sql`:
+- `ALTER TABLE chunk_meta ADD COLUMN IF NOT EXISTS session_date DATE`,
+  `track_type TEXT`, `track_title TEXT`, `location TEXT`, `event_id TEXT`,
+  `season TEXT` + GIN/BTREE indexes (idempotent)
+- Same for `file_meta` where appropriate
+
+`open_webui_functions/search_transcripts.py`:
+- Add filter args to `search_transcripts()`:
+  `date_range: tuple[str, str] | None`, `season: str | None`,
+  `track_type: list[str] | str | None`, `location: str | None`,
+  `event_id: str | None`
+- Update docstring with examples for each new arg so the LLM learns
+  when to use them
+- Default behavior unchanged when no new args passed
+
+`docs/best_practices.md` (new) — companion doc covering:
+- Chunking principles for retrieval accuracy
+- Embedding-side practices (header enrichment, multilingual care)
+- Query-side practices (HyDE, multi-query, filter extraction)
+- ASR-side practices (Whisper prompt-bias for proper names → addresses
+  the unresolved "Anush" problem from the trigger)
+- QC + eval discipline (golden-query expansion, spot-check sampling)
+
+**Acceptance criteria:**
+- `pytest tests/unit/test_path_parser.py -v` green.
+- Full existing unit suite still green (no regressions).
+- `parse_path()` on the example path returns:
+  `track_type='discourse'`, `season='winter'`, `session_date=2010-01-07`,
+  `location='NOIDA'`, `event_id='01 NOIDA 7 - 10 JAN 2010'`,
+  `primary_speaker='Swami ji'`.
+- `qdrant_setup.py` and `analytics_schema.sql` are idempotent on second run.
+- `search_transcripts()` correctly applies each new filter arg
+  (covered by extension to `tests/integration/test_function_tools.py`).
+- `docs/best_practices.md` exists and is internally consistent with
+  the PRD's locked technical decisions (§3).
+
+**Commit:** `feat: path-based metadata extraction with filter-enabled retrieval (Phase 12)`
+
+---
+
 ## 7. End-to-end deployment runbook (the happy path)
 
 After all phases complete, this is the sequence to actually deploy:
