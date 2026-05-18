@@ -355,6 +355,119 @@ def test_parse_track_extension_stripped():
     assert meta3.track_title == "PRAVACHAN"
 
 
+# ---- Real-world: user's vocal-isolation + whisper folder layout -------
+#
+# Upstream (D:\GuruAudio) appends "_isolation" to every level and inserts an
+# extra "<NN> <TITLE>_model-..." folder between the session and the actual
+# transcript file. The parser must tolerate both without losing metadata.
+
+
+_USER_BASE = "/mnt/d/GuruAudio/Output Transcribe"
+# Real 6-level path observed in the user's tree: whisper drops files inside
+# a `turbo/` (inference-size) folder under the `_model-...` folder.
+_USER_PATH = (
+    f"{_USER_BASE}/Live Masters 2010_isolation/"
+    "01 NOIDA 7 - 10 JAN 2010_isolation/"
+    "7 JAN - 1$ - 6 PM_isolation/"
+    "04 PRAVACHAN_model-1_mel_roformer_kim_ft/"
+    "turbo/"
+    "04 PRAVACHAN.json"
+)
+
+
+def test_parse_user_real_path_full_metadata():
+    """The user's actual folder layout (with `_isolation` suffixes and
+    an extra `_model-...` folder above the file) must yield full metadata,
+    identical to the canonical PRD layout."""
+    meta = parse_path(_USER_PATH, base_dir=_USER_BASE)
+    assert meta.collection == "Live Masters"
+    assert meta.year == 2010
+    assert meta.event_id == "01 NOIDA 7 - 10 JAN 2010"  # suffix stripped
+    assert meta.event_seq == 1
+    assert meta.location == "NOIDA"
+    assert meta.event_start == date(2010, 1, 7)
+    assert meta.event_end == date(2010, 1, 10)
+    assert meta.session_date == date(2010, 1, 7)
+    assert meta.session_seq == 1
+    assert meta.session_time == time(18, 0)
+    assert meta.track_no == 4
+    assert meta.track_title == "PRAVACHAN"
+    assert meta.track_type == "discourse"
+    assert meta.season == "winter"
+    assert meta.parse_warnings == []
+
+
+def test_parse_user_real_path_no_base_dir():
+    """Without base_dir the parser still walks rightmost levels and
+    recovers the same fields."""
+    meta = parse_path(_USER_PATH)
+    assert meta.location == "NOIDA"
+    assert meta.session_date == date(2010, 1, 7)
+    assert meta.track_type == "discourse"
+
+
+def test_isolation_suffix_stripped_from_event_id():
+    """event_id is the cleaned (suffix-stripped) folder name, not the raw
+    one — downstream filter UIs surface this string verbatim."""
+    meta = parse_path(_USER_PATH, base_dir=_USER_BASE)
+    assert "_isolation" not in (meta.event_id or "")
+
+
+def test_model_folder_alone_above_track_still_resolves_track():
+    """Stray top-level model folder (e.g.
+    "03 PRAVACHAN IN MEDITATION_model-..." sitting directly under the
+    Output Transcribe root) drops out cleanly — the file's track parses,
+    higher levels gracefully warn."""
+    p = (
+        f"{_USER_BASE}/03 PRAVACHAN IN MEDITATION_model-1_mel_roformer_kim_ft/"
+        "turbo/03 PRAVACHAN IN MEDITATION.json"
+    )
+    meta = parse_path(p, base_dir=_USER_BASE)
+    # Track still parses (the file itself):
+    assert meta.track_title == "PRAVACHAN IN MEDITATION"
+    assert meta.track_no == 3
+    # "PRAVACHAN IN MEDITATION" isn't an exact match for any vocab entry,
+    # so it falls back to the default — consistent with the rest of the
+    # vocab contract.
+    assert meta.track_type == DEFAULT_TRACK_TYPE
+    # No collection/event/session info recoverable — that's acceptable:
+    assert meta.collection is None
+    assert meta.event_id is None
+    assert meta.session_date is None
+
+
+def test_only_isolation_suffix_still_parses():
+    """If only the `_isolation` suffix appears (no model folder), each
+    level should still parse."""
+    p = (
+        f"{_USER_BASE}/Live Masters 2010_isolation/"
+        "01 NOIDA 7 - 10 JAN 2010_isolation/"
+        "7 JAN - 1$ - 6 PM_isolation/"
+        "04 PRAVACHAN.txt"
+    )
+    meta = parse_path(p, base_dir=_USER_BASE)
+    assert meta.year == 2010
+    assert meta.location == "NOIDA"
+    assert meta.session_time == time(18, 0)
+    assert meta.track_title == "PRAVACHAN"
+    assert meta.parse_warnings == []
+
+
+def test_model_folder_dropped_does_not_break_3level_path():
+    """Path missing the collection level (only event/session/model-folder/
+    file) still recovers event + session + track."""
+    p = (
+        f"{_USER_BASE}/01 NOIDA 7 - 10 JAN 2010_isolation/"
+        "7 JAN - 1$ - 6 PM_isolation/"
+        "04 PRAVACHAN_model-1_mel_roformer_kim_ft/"
+        "04 PRAVACHAN.json"
+    )
+    meta = parse_path(p, base_dir=_USER_BASE)
+    assert meta.event_id == "01 NOIDA 7 - 10 JAN 2010"
+    assert meta.session_date == date(2010, 1, 7)
+    assert meta.track_title == "PRAVACHAN"
+
+
 # ---- PRIMARY_SPEAKER as single source of truth ------------------------
 
 

@@ -189,8 +189,9 @@ def chunk_segments(
             buf_speakers = set()
 
     # Tail flush — emit whatever remains even if below MIN; better to keep
-    # the trailing content than drop it.
-    chunk = _flush(buf, source_name, fmt)
+    # the trailing content than drop it. Must propagate path_meta or short
+    # single-chunk files would lose their event/date/track metadata.
+    chunk = _flush(buf, source_name, fmt, path_meta)
     if chunk:
         chunks.append(chunk)
     return chunks

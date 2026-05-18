@@ -59,6 +59,36 @@ _MONTHS: dict[str, int] = {
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
 
+# Suffixes appended by the upstream vocal-isolation / whisper pipelines.
+# These get tacked onto folder names ("Live Masters 2010_isolation") and must
+# be stripped before the level regexes run, otherwise the year/AM-PM anchors
+# at end-of-string never match.
+_FOLDER_SUFFIX_RE = re.compile(r"(_isolation|_model-.*)$")
+
+# Folders matching this pattern are inserted by the whisper pipeline between
+# the session-level folder and the actual transcript files. They carry no
+# semantic information for retrieval; drop them when walking levels so the
+# parser sees the intended 4-level structure.
+_MODEL_FOLDER_RE = re.compile(r"_model-")
+
+# Exact folder names produced by the whisper CLI as a leaf scaffolding
+# directory (one per inference model size). Drop these from the parent
+# chain. Keep this list narrow — only names we've seen in this pipeline.
+_SCAFFOLDING_FOLDERS: frozenset[str] = frozenset({"turbo"})
+
+
+def _strip_folder_suffix(name: str) -> str:
+    """Strip pipeline-added suffixes ('_isolation', '_model-...') from a
+    folder name so it parses against the PRD-spec regexes."""
+    return _FOLDER_SUFFIX_RE.sub("", name).strip()
+
+
+def _is_pipeline_scaffolding(name: str) -> bool:
+    """True for folders inserted by the upstream whisper pipeline that
+    carry no semantic info (model-name folders, turbo/ leaf folders)."""
+    return name in _SCAFFOLDING_FOLDERS or bool(_MODEL_FOLDER_RE.search(name))
+
+
 # Regex grammars. Liberal on whitespace; case-insensitive where it matters.
 # Collection: any text ending with a 4-digit year.
 _COLLECTION_RE = re.compile(r"^(?P<name>.+?)\s+(?P<year>\d{4})$")
@@ -184,7 +214,7 @@ def track_type_for(title: str) -> str:
 
 
 def _parse_collection(name: str, meta: PathMetadata) -> None:
-    m = _COLLECTION_RE.match(name.strip())
+    m = _COLLECTION_RE.match(_strip_folder_suffix(name))
     if not m:
         meta.parse_warnings.append(f"collection: could not parse {name!r}")
         return
@@ -196,11 +226,12 @@ def _parse_collection(name: str, meta: PathMetadata) -> None:
 
 
 def _parse_event(name: str, meta: PathMetadata) -> None:
-    m = _EVENT_RE.match(name.strip())
+    cleaned = _strip_folder_suffix(name)
+    m = _EVENT_RE.match(cleaned)
     if not m:
         meta.parse_warnings.append(f"event: could not parse {name!r}")
         return
-    meta.event_id = name.strip()
+    meta.event_id = cleaned
     try:
         meta.event_seq = int(m.group("seq"))
     except ValueError:
@@ -222,7 +253,7 @@ def _parse_event(name: str, meta: PathMetadata) -> None:
 
 
 def _parse_session(name: str, meta: PathMetadata) -> None:
-    m = _SESSION_RE.match(name.strip())
+    m = _SESSION_RE.match(_strip_folder_suffix(name))
     if not m:
         meta.parse_warnings.append(f"session: could not parse {name!r}")
         return
@@ -324,6 +355,14 @@ def parse_path(path: Path | str, base_dir: Path | str | None = None) -> PathMeta
     if not parts:
         meta.parse_warnings.append("empty path after stripping anchor/base_dir")
         return meta
+
+    # Drop whisper model-name folders from the parent chain (e.g.
+    # "04 PRAVACHAN_model-1_mel_roformer_kim_ft"). They sit between the
+    # session folder and the actual transcript file and would otherwise
+    # shift every level by one. Only filter parents — never the track itself.
+    if len(parts) > 1:
+        parents_kept = [p for p in parts[:-1] if not _is_pipeline_scaffolding(p)]
+        parts = parents_kept + [parts[-1]]
 
     # The track is always the last component (the file itself). The three
     # parents above it (if present) map to session, event, collection.

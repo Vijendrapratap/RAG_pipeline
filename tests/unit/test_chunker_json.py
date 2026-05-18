@@ -180,6 +180,48 @@ def test_process_file_writes_chunks_json(tmp_path):
         assert c["text"].startswith("[Source: sample_whisperx.json")
 
 
+def test_short_file_tail_flush_preserves_path_metadata(tmp_path):
+    """Regression: a single-chunk file (so short that only the tail flush
+    emits it) must still carry path_metadata. Earlier code dropped it for
+    the tail-only path."""
+    # Build a path that matches the PRD-spec hierarchy so parse_path
+    # returns a fully-populated PathMetadata.
+    base = tmp_path / "audio"
+    track_dir = (
+        base
+        / "Live Masters 2010"
+        / "01 NOIDA 7 - 10 JAN 2010"
+        / "7 JAN - 1$ - 6 PM"
+    )
+    track_dir.mkdir(parents=True)
+    src = track_dir / "04 PRAVACHAN.json"
+    src.write_text(
+        json.dumps({"segments": [
+            # Tiny content: well below MIN_TOKENS so only tail flush fires.
+            {"start": 0.0, "end": 1.5, "text": "hello world", "speaker": "A"}
+        ]}),
+        encoding="utf-8",
+    )
+
+    out_dir = tmp_path / "out"
+    n, status = cj.process_file(src, out_dir, "whisperx",
+                                failed_dir=out_dir / "_failed",
+                                base_dir=base)
+    assert status == "ok"
+    assert n == 1
+    payload = json.loads(
+        (out_dir / "04 PRAVACHAN.chunks.json").read_text(encoding="utf-8")
+    )
+    ch = payload["chunks"][0]
+    pm = ch.get("path_metadata")
+    assert pm is not None, "tail-flushed chunk lost path_metadata"
+    assert pm["event_id"] == "01 NOIDA 7 - 10 JAN 2010"
+    assert pm["location"] == "NOIDA"
+    assert pm["session_date"] == "2010-01-07"
+    assert pm["track_title"] == "PRAVACHAN"
+    assert pm["track_type"] == "discourse"
+
+
 def test_malformed_json_logs_to_failed_continues(tmp_path):
     out_dir = tmp_path / "out"
     failed_dir = out_dir / "_failed"
