@@ -48,6 +48,13 @@ def main():
         ("season",          PayloadSchemaType.KEYWORD),
         ("year",            PayloadSchemaType.INTEGER),
         ("primary_speaker", PayloadSchemaType.KEYWORD),
+        # --- Phase 13 (content tags propagated from file_meta) ---
+        ("event_type",            PayloadSchemaType.KEYWORD),
+        ("primary_language",      PayloadSchemaType.KEYWORD),
+        ("topics",                PayloadSchemaType.KEYWORD),
+        ("people_named",          PayloadSchemaType.KEYWORD),
+        ("places_named",          PayloadSchemaType.KEYWORD),
+        ("scriptures_referenced", PayloadSchemaType.KEYWORD),
     ]:
         try:
             client.create_payload_index(COLLECTION, field, schema)

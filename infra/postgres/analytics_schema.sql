@@ -51,3 +51,32 @@ CREATE INDEX IF NOT EXISTS idx_file_track_type   ON file_meta(track_type);
 CREATE INDEX IF NOT EXISTS idx_file_location     ON file_meta(location);
 CREATE INDEX IF NOT EXISTS idx_file_event_id     ON file_meta(event_id);
 CREATE INDEX IF NOT EXISTS idx_file_season       ON file_meta(season);
+
+-- ============================================================================
+-- Phase 13 — content-based tags (per-file LLM enrichment).
+-- ============================================================================
+-- These columns hold per-file metadata extracted by Qwen 2.5 7B reading the
+-- whole transcript. Path metadata (Phase 12) says when/where it was recorded;
+-- these columns say what the audio is *about*. tagged_at NULL means "not yet
+-- tagged" — the enrichment script is resumable on this predicate.
+
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS event_type            TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS primary_language      TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS topics                TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS people_named          TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS places_named          TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS scriptures_referenced TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS timing_clues          TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS location_clues        TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS summary_hindi         TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS summary_english       TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS tagged_at             TIMESTAMP;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS tag_model             TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_file_event_type       ON file_meta(event_type);
+CREATE INDEX IF NOT EXISTS idx_file_primary_language ON file_meta(primary_language);
+CREATE INDEX IF NOT EXISTS idx_file_tagged_at        ON file_meta(tagged_at);
+CREATE INDEX IF NOT EXISTS idx_file_topics           ON file_meta USING GIN (topics);
+CREATE INDEX IF NOT EXISTS idx_file_people_named     ON file_meta USING GIN (people_named);
+CREATE INDEX IF NOT EXISTS idx_file_places_named     ON file_meta USING GIN (places_named);
+CREATE INDEX IF NOT EXISTS idx_file_scriptures_ref   ON file_meta USING GIN (scriptures_referenced);

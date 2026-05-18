@@ -1039,6 +1039,121 @@ A path parser captures all of it with zero ML overhead.
 
 ---
 
+### Phase 13 — Content-based tagging (per-file LLM enrichment)
+
+**Objective:** After ingest, run each file's full transcript through the
+local Qwen 2.5 7B (Ollama) to extract a fixed-schema content tag set —
+`event_type`, `primary_language`, `topics`, `people_named`, `places_named`,
+`scriptures_referenced`, `timing_clues`, `location_clues`, `summary_hindi`,
+`summary_english`. These complement Phase 12's path-based metadata
+(recording-time facts) with content-based facts (what the audio is
+*about*) and unlock filters like "satsangs that mention the Bhagavad Gita"
+or "discourses where Guruji talks about a specific person."
+
+**Locked design decisions:**
+
+| Decision | Choice |
+|---|---|
+| Tagging model | Qwen 2.5 7B (q4_K_M) via Ollama — already deployed, multilingual, fast. `tag_model` column records exact tag for audit. |
+| Granularity | Per source file. One tag set per `file_meta.source_file` row. Chunks inherit via Qdrant `set_payload` filtered by `source_file`. |
+| Stage | Separate enrichment pass *after* ingest. Resumable: `WHERE tagged_at IS NULL`. Failure in tagging never blocks ingest or search. |
+| Long-file strategy | Single-pass with `num_ctx=32768` when transcript ≤ `--max-tokens-single-pass` (default 28000). Beyond that, map-reduce on existing `chunk_meta` rows: per-chunk mini-summaries → final tag pass on the concatenated summaries. Summaries always reflect full content. |
+| JSON contract | Ollama `format: "json"` + post-hoc validation (right keys, right types, `event_type` in enum, summaries non-empty). Bad output → dead-letter with raw model response. |
+| Path-metadata relationship | Additive only. Phase 12 columns (`session_date`, `season`, `track_type`, `location`, `event_id`) untouched. Content tags live alongside. |
+
+**Schema additions** (`infra/postgres/analytics_schema.sql`, all idempotent):
+
+```sql
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS event_type            TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS primary_language      TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS topics                TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS people_named          TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS places_named          TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS scriptures_referenced TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS timing_clues          TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS location_clues        TEXT[];
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS summary_hindi         TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS summary_english       TEXT;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS tagged_at             TIMESTAMP;
+ALTER TABLE file_meta ADD COLUMN IF NOT EXISTS tag_model             TEXT;
+```
+Plus GIN indexes on the array columns and B-tree on `event_type`, `primary_language`, `tagged_at`.
+
+**Deliverables:**
+
+`ingestion/enrich_content_tags.py` — new resumable script:
+- Selects `source_file` from `file_meta` WHERE `tagged_at IS NULL`
+- Reconstructs the full transcript by concatenating `chunk_meta.text` for
+  that file (ordered by `start_sec`)
+- Routes through single-pass or map-reduce by token-budget check
+- Calls Ollama `/api/generate` with Qwen 2.5 7B, `format: "json"`,
+  `num_ctx=32768`
+- Validates the JSON contract; failures go to `dead_letter/tag_*/`
+- Writes tags to `file_meta`; then `qdrant_client.set_payload(...,
+  payload_selector=Filter(must=[FieldCondition(key="source_file",
+  match=MatchValue(value=src))]))` to propagate to all chunks of that file
+- CLI: `--limit N`, `--retry-failed`, `--max-tokens-single-pass`,
+  `--model`, `--dry-run`
+
+`ingestion/utils/tag_schema.py` — pure helpers:
+- `TAG_SCHEMA` constant (the JSON shape Qwen must return)
+- `build_prompt(transcript: str) -> str` — schema-strict prompt builder
+- `validate_tags(obj: dict) -> tuple[bool, list[str]]` — checks keys, types, enum
+
+`ingestion/chunker_text.py` + `chunker_json.py`:
+- Add `--skip-existing` flag (default ON) so files whose `.chunks.json`
+  already exists are skipped. Tiny fix to make re-running the chunker
+  on a growing input directory cheap.
+
+`infra/qdrant/qdrant_setup.py`:
+- Add idempotent payload indexes for `event_type` (KEYWORD),
+  `primary_language` (KEYWORD), `topics` (KEYWORD),
+  `people_named` (KEYWORD), `places_named` (KEYWORD),
+  `scriptures_referenced` (KEYWORD)
+
+`open_webui_functions/search_transcripts.py`:
+- Add filter args to `search_transcripts()`:
+  `event_type: str | None`, `primary_language: str | None`,
+  `topics: list[str] | None`, `people_named: list[str] | None`,
+  `scriptures_referenced: list[str] | None`
+- Update docstring with concrete examples (the LLM reads this to learn when to use them)
+- All array filters use Qdrant `MatchAny` semantics (logical OR within filter)
+
+`scripts/06_enrich_tags.sh` — wrapper with sane defaults (reads `.env`,
+exits non-zero on failure, supports `--limit N`).
+
+`tests/unit/test_enrich_content_tags.py`:
+- Prompt builder includes all schema keys and the input transcript
+- Validator accepts a well-formed sample and rejects: missing keys, wrong
+  types, unknown `event_type`, empty summaries
+- Idempotency: re-running on a file already marked `tagged_at IS NOT NULL`
+  is a no-op
+- Bad model JSON → file moved to dead-letter, not silently dropped
+
+`docs/best_practices.md` — append new section:
+- When path metadata vs content tags is the right filter
+- Prompt-tuning tips (verbatim quote enforcement, Hindi script integrity)
+- Cost expectations (~20–60s per file on GPU; CPU is impractical)
+
+**Acceptance criteria:**
+- `pytest tests/unit/test_enrich_content_tags.py -v` green.
+- Full existing unit suite still green (no regressions).
+- `analytics_schema.sql` and `qdrant_setup.py` remain idempotent on
+  second run.
+- Running the chunker twice over the same input dir: second run skips
+  all already-chunked files (visible in log totals).
+- Running `enrich_content_tags.py` twice: second run finds 0 untagged
+  files and exits cleanly.
+- One end-to-end smoke test: ingest a small file → run enrichment → confirm
+  file_meta row has populated `summary_hindi`/`summary_english`/tags and
+  `set_payload` on Qdrant succeeded for that file's chunks.
+- `search_transcripts()` with `topics=["karma"]` returns only chunks
+  whose `source_file` has `karma` in its `topics` array.
+
+**Commit:** `feat: per-file content tagging via Qwen 2.5 7B (Phase 13)`
+
+---
+
 ## 7. End-to-end deployment runbook (the happy path)
 
 After all phases complete, this is the sequence to actually deploy:

@@ -108,12 +108,19 @@ class Tools:
         track_type: list[str] | str | None = None,
         location: str | None = None,
         event_id: str | None = None,
+        event_type: str | None = None,
+        primary_language: str | None = None,
+        topics: list[str] | None = None,
+        people_named: list[str] | None = None,
+        scriptures_referenced: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Qdrant ANN search. Returns list of {id, score, payload}.
 
         Phase 12 adds path-metadata filters (date_range, season, track_type,
-        location, event_id). All are AND-combined with the existing
-        speaker/source_file filters via Qdrant's must clause.
+        location, event_id). Phase 13 adds content-tag filters (event_type,
+        primary_language, topics, people_named, scriptures_referenced).
+        Array filters (topics/people_named/scriptures_referenced) use
+        MatchAny — logical OR within the filter, AND across filters.
         """
         must: list[dict[str, Any]] = []
         if speaker:
@@ -132,6 +139,18 @@ class Tools:
         if date_range:
             gte, lte = date_range
             must.append({"key": "session_date", "range": {"gte": gte, "lte": lte}})
+        # --- Phase 13 content-tag filters ---
+        if event_type:
+            must.append({"key": "event_type", "match": {"value": event_type}})
+        if primary_language:
+            must.append({"key": "primary_language", "match": {"value": primary_language}})
+        if topics:
+            must.append({"key": "topics", "match": {"any": list(topics)}})
+        if people_named:
+            must.append({"key": "people_named", "match": {"any": list(people_named)}})
+        if scriptures_referenced:
+            must.append({"key": "scriptures_referenced",
+                         "match": {"any": list(scriptures_referenced)}})
 
         body: dict[str, Any] = {
             "vector": vec,
@@ -275,6 +294,17 @@ class Tools:
                 meta_bits.append(f"Type: {pl['track_type']}")
             if pl.get("season"):
                 meta_bits.append(f"Season: {pl['season']}")
+            # Phase 13 content tags — only printed when present.
+            if pl.get("event_type"):
+                meta_bits.append(f"EventType: {pl['event_type']}")
+            if pl.get("primary_language"):
+                meta_bits.append(f"Lang: {pl['primary_language']}")
+            if pl.get("topics"):
+                meta_bits.append(f"Topics: {', '.join(pl['topics'])}")
+            if pl.get("scriptures_referenced"):
+                meta_bits.append(
+                    f"Scriptures: {', '.join(pl['scriptures_referenced'])}"
+                )
             if meta_bits:
                 out.append(" | ".join(meta_bits))
             out.append(pl.get("text", ""))
@@ -295,10 +325,18 @@ class Tools:
         track_type: list[str] | str | None = None,
         location: str | None = None,
         event_id: str | None = None,
+        event_type: str | None = None,
+        primary_language: str | None = None,
+        topics: list[str] | None = None,
+        people_named: list[str] | None = None,
+        scriptures_referenced: list[str] | None = None,
     ) -> str:
         """Hybrid semantic + BM25 search over transcripts, with optional
-        metadata filters extracted from the source folder hierarchy
-        (PRD §6 Phase 12).
+        metadata filters. Two filter families:
+        - Path-based (Phase 12): when/where it was recorded. date_range,
+          season, track_type, location, event_id.
+        - Content-based (Phase 13): what the audio is about. event_type,
+          primary_language, topics, people_named, scriptures_referenced.
 
         Use this when the user asks about a topic, theme, or concept ("what
         did we discuss about latency?", "find content about the new dashboard").
@@ -329,6 +367,21 @@ class Tools:
             uppercase before the filter.
         :param event_id: Optional event folder name, e.g.
             "01 NOIDA 7 - 10 JAN 2010". Pin to a specific camp/event.
+        :param event_type: Optional content tag. One of "satsang", "bhajan",
+            "meditation", "qa", "discourse", "mixed", "unknown". Differs
+            from track_type (path-derived) by reflecting what the model
+            actually heard, not what folder named the file.
+        :param primary_language: Optional. One of "hindi", "sanskrit",
+            "mixed". Useful when user wants only Hindi summaries or only
+            Sanskrit chant content.
+        :param topics: Optional list of topic tags. Logical OR within the
+            list. Tags are lowercase hyphenated (e.g. "karma-yoga",
+            "self-inquiry", "guru-bhakti").
+        :param people_named: Optional list of names. Returns files where
+            Guruji *mentions* any of these people. Match is exact on the
+            tag string — ASR transliterations may need spelling variants.
+        :param scriptures_referenced: Optional list. e.g.
+            ["Bhagavad Gita", "Upanishads", "Yoga Sutras"]. Logical OR.
         :return: Formatted text with one block per result, including source
             file, timestamps, speakers, BM25/dense fused + reranked score,
             and the chunk text. Citations are surfaced in the chat UI.
@@ -339,8 +392,12 @@ class Tools:
         - "Find discourses from the Noida camp in January 2010"
             → location="NOIDA", date_range=("2010-01-01", "2010-01-31"),
               track_type="discourse"
-        - "What did he say at the morning sessions?"
-            → (no folder-time filter yet — that would be a future field)
+        - "When did Guruji talk about the Bhagavad Gita?"
+            → scriptures_referenced=["Bhagavad Gita"]
+        - "Find satsangs where he mentions Anush"
+            → event_type="satsang", people_named=["Anush"]
+        - "Discourses about karma yoga"
+            → topics=["karma-yoga"], track_type="discourse"
         """
         # Allow caller to dial top_k down per-call; cap at valves to keep
         # rerank batch reasonable.
@@ -350,19 +407,31 @@ class Tools:
             vec, speaker, source_file,
             date_range=date_range, season=season, track_type=track_type,
             location=location, event_id=event_id,
+            event_type=event_type, primary_language=primary_language,
+            topics=topics, people_named=people_named,
+            scriptures_referenced=scriptures_referenced,
         )
         bm25 = self._bm25(query)
         fused = self._rrf(dense, bm25, self.valves.bm25_weight)
         # Post-fusion filter: BM25-only hits don't carry payload metadata,
-        # so any Phase 12 filter that's set is enforced here against the
-        # dense-side payloads we do have. BM25-only hits without payload
-        # are dropped when a metadata filter is active (consistent with
-        # the user's intent — they asked for a filtered subset).
-        if (speaker or source_file or season or track_type
-                or location or event_id or date_range):
+        # so any filter that's set is enforced here against the dense-side
+        # payloads we do have. BM25-only hits without payload are dropped
+        # when a metadata filter is active (consistent with user intent —
+        # they asked for a filtered subset).
+        any_filter = (
+            speaker or source_file or season or track_type
+            or location or event_id or date_range
+            or event_type or primary_language or topics
+            or people_named or scriptures_referenced
+        )
+        if any_filter:
             tt_set: set[str] | None = None
             if track_type:
                 tt_set = {track_type} if isinstance(track_type, str) else set(track_type)
+            topics_set = set(topics) if topics else None
+            people_set = set(people_named) if people_named else None
+            scriptures_set = (set(scriptures_referenced)
+                              if scriptures_referenced else None)
             filtered: list[tuple[str, float, dict[str, Any]]] = []
             for c, s, pl in fused:
                 if speaker and speaker not in (pl.get("speakers") or []):
@@ -382,6 +451,22 @@ class Tools:
                     sd = pl.get("session_date")
                     if not (gte <= sd <= lte):
                         continue
+                if event_type and pl.get("event_type") != event_type:
+                    continue
+                if primary_language and pl.get("primary_language") != primary_language:
+                    continue
+                if topics_set is not None and not (
+                    topics_set & set(pl.get("topics") or [])
+                ):
+                    continue
+                if people_set is not None and not (
+                    people_set & set(pl.get("people_named") or [])
+                ):
+                    continue
+                if scriptures_set is not None and not (
+                    scriptures_set & set(pl.get("scriptures_referenced") or [])
+                ):
+                    continue
                 filtered.append((c, s, pl))
             fused = filtered
         reranked = self._rerank(query, fused[: self.valves.candidates_per_source])

@@ -170,11 +170,16 @@ def process_file(
     out_dir: Path,
     failed_dir: Path,
     base_dir: Path | None = None,
+    skip_existing: bool = True,
 ) -> tuple[int, str]:
     size = in_path.stat().st_size
     if size > MAX_FILE_BYTES:
         log.warning("%s: %.1f MB exceeds %d MB cap — skipping", in_path, size / 1e6,
                     MAX_FILE_BYTES // (1024 * 1024))
+        return 0, "skipped"
+    out_path = out_dir / f"{in_path.stem}.chunks.json"
+    if skip_existing and out_path.exists():
+        log.info("%s: output already exists (%s) — skipping", in_path.name, out_path.name)
         return 0, "skipped"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -182,7 +187,6 @@ def process_file(
         sentences = split_sentences(text)
         path_meta = _path_meta_for(in_path, base_dir)
         chunks = chunk_sentences(sentences, in_path.name, path_meta)
-        out_path = out_dir / f"{in_path.stem}.chunks.json"
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(
                 {"source_file": in_path.name, "format": "text", "chunks": chunks},
@@ -238,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--recursive", "-r", action="store_true",
                    help="Walk input_dir recursively (needed for the nested "
                         "audio folder layout that Phase 12 parses).")
+    p.add_argument("--no-skip-existing", action="store_true",
+                   help="Re-chunk files even when .chunks.json output already "
+                        "exists. Default: skip existing outputs (Phase 13). "
+                        "Use this to force a re-chunk after tuning parameters.")
     args = p.parse_args(argv)
 
     out_dir = Path(args.output_dir)
@@ -258,9 +266,12 @@ def main(argv: list[str] | None = None) -> int:
             log.error("input_dir does not exist or is not a directory: %s", in_dir)
             return 2
         files = sorted(in_dir.rglob("*.txt") if args.recursive else in_dir.glob("*.txt"))
+        skip_existing = not args.no_skip_existing
         for f in files:
             totals["files"] += 1
-            n, status = process_file(f, out_dir, failed_dir, base_dir=base_dir)
+            n, status = process_file(f, out_dir, failed_dir,
+                                     base_dir=base_dir,
+                                     skip_existing=skip_existing)
             totals["chunks"] += n
             if status == "failed":
                 totals["failed"] += 1
