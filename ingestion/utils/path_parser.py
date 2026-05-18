@@ -106,10 +106,12 @@ _EVENT_RE = re.compile(
 
 # Session: "<D> <MON> - <SEQ>$ - <H> <AM|PM>"
 # The $ marker after SEQ is optional (older folders may use a hyphen alone).
+# Time may be written as "6 PM" (H), "10:30 AM" (H:MM), or "1030 AM" (HHMM
+# without colon — observed in upstream whisper pipeline output).
 _SESSION_RE = re.compile(
     r"^(?P<day>\d{1,2})\s+(?P<mon>[A-Z]{3})\s*-\s*"
     r"(?P<seq>\d+)\$?\s*-\s*"
-    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*"
+    r"(?P<hour>\d{1,4})(?::(?P<minute>\d{2}))?\s*"
     r"(?P<mer>AM|PM)$",
     re.IGNORECASE,
 )
@@ -279,8 +281,15 @@ def _parse_session(name: str, meta: PathMetadata) -> None:
         except (ValueError, OverflowError) as e:
             meta.parse_warnings.append(f"session: bad date in {name!r}: {e}")
     try:
-        hour_24 = _to_24h(int(m.group("hour")), m.group("mer").upper())
-        minute = int(m.group("minute")) if m.group("minute") else 0
+        hour_raw = m.group("hour")
+        # HHMM without colon: "1030" → 10:30, "930" → 9:30
+        if len(hour_raw) >= 3:
+            hour_12 = int(hour_raw[:-2])
+            minute = int(hour_raw[-2:])
+        else:
+            hour_12 = int(hour_raw)
+            minute = int(m.group("minute")) if m.group("minute") else 0
+        hour_24 = _to_24h(hour_12, m.group("mer").upper())
         meta.session_time = time(hour_24, minute)
     except (ValueError, OverflowError) as e:
         meta.parse_warnings.append(f"session: bad time in {name!r}: {e}")

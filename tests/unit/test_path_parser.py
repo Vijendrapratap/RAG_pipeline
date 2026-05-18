@@ -436,6 +436,34 @@ def test_model_folder_alone_above_track_still_resolves_track():
     assert meta.session_date is None
 
 
+def test_parse_hhmm_time_format_1030am():
+    """Session folder written as '1030 AM' (no colon) must parse as 10:30."""
+    p = (
+        f"{_USER_BASE}/Live Masters 2010_isolation/"
+        "01 NOIDA 7 - 10 JAN 2010_isolation/"
+        "10 JAN - 6$ - 1030 AM_isolation/"
+        "06 SAMBODHAN_model-1_mel_roformer_kim_ft/turbo/06 SAMBODHAN.json"
+    )
+    meta = parse_path(p, base_dir=_USER_BASE)
+    assert meta.session_date == date(2010, 1, 10)
+    assert meta.session_time == time(10, 30)
+    assert meta.session_seq == 6
+    assert meta.parse_warnings == []
+
+
+def test_parse_hhmm_time_format_930am():
+    """3-digit HHMM: '930 AM' → 9:30 AM."""
+    p = (
+        f"{_USER_BASE}/Live Masters 2010_isolation/"
+        "01 NOIDA 7 - 10 JAN 2010_isolation/"
+        "8 JAN - 3$ - 930 AM_isolation/"
+        "04 PRAVACHAN_model-1/turbo/04 PRAVACHAN.json"
+    )
+    meta = parse_path(p, base_dir=_USER_BASE)
+    assert meta.session_time == time(9, 30)
+    assert meta.parse_warnings == []
+
+
 def test_only_isolation_suffix_still_parses():
     """If only the `_isolation` suffix appears (no model folder), each
     level should still parse."""
