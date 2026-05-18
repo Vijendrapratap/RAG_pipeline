@@ -172,3 +172,4 @@ All components are open-source (MIT / Apache-2.0 / BSD / similar).
 Per-component license verification documented in PRD §14. **No paid
 APIs anywhere** — this is a hard requirement and is enforced phase by
 phase.
+# Vishwas_RAG-pipeline
