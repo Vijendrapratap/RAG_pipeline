@@ -1,0 +1,48 @@
+{
+  "segments": [
+    {
+      "start": 0.00, "end": 4.20, "speaker": "SPEAKER_00",
+      "text": "Welcome everyone to today's quarterly review meeting. I'm glad we could all make it on such short notice."
+    },
+    {
+      "start": 4.20, "end": 9.80, "speaker": "SPEAKER_00",
+      "text": "Before we dive in, let me give a brief overview of what we'll be covering today across the three main agenda items."
+    },
+    {
+      "start": 9.80, "end": 16.30, "speaker": "SPEAKER_00",
+      "text": "First, we'll review the financial performance for Q3. Second, we'll discuss the product roadmap for the next two quarters."
+    },
+    {
+      "start": 16.30, "end": 22.50, "speaker": "SPEAKER_00",
+      "text": "And third, we'll address some organizational changes that the leadership team has been working through over the past month."
+    },
+    {
+      "start": 22.50, "end": 30.10, "speaker": "SPEAKER_01",
+      "text": "Thanks for the setup. On the financial side, revenue came in at 47 million for the quarter, up 18 percent year over year."
+    },
+    {
+      "start": 30.10, "end": 38.40, "speaker": "SPEAKER_01",
+      "text": "Operating margin expanded by roughly 220 basis points compared to the prior period, driven largely by improvements in cost of goods sold and a more disciplined hiring posture."
+    },
+    {
+      "start": 38.40, "end": 46.90, "speaker": "SPEAKER_01",
+      "text": "Looking ahead, we're forecasting Q4 revenue between 51 and 54 million, with continued margin expansion if current cost trends hold."
+    },
+    {
+      "start": 46.90, "end": 52.20, "speaker": "SPEAKER_02",
+      "text": "On the product side, the new analytics dashboard launches November 8th. We have three enterprise customers already lined up for the beta."
+    },
+    {
+      "start": 52.20, "end": 60.00, "speaker": "SPEAKER_02",
+      "text": "The mobile rewrite is on track for end of Q1 next year. We're spending more time on the offline sync layer than originally scoped, but it's the right call given customer feedback."
+    },
+    {
+      "start": 60.00, "end": 68.50, "speaker": "SPEAKER_00",
+      "text": "Great, thank you both. On the organizational side, we're standing up a dedicated platform team starting in January, reporting into engineering with a dotted line to product."
+    },
+    {
+      "start": 68.50, "end": 75.20, "speaker": "SPEAKER_00",
+      "text": "We'll have more to share on staffing in the next all-hands. Any questions before we wrap?"
+    }
+  ]
+}

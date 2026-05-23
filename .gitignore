@@ -1,0 +1,30 @@
+# Claude Code session state
+.claude/
+
+# Secrets and local overrides
+.env
+docker-compose.override.yml
+
+# Local-only build log (per user decision 2026-05-17)
+doc.md
+
+# Phase 9 eval reports (per-run JSON; keep .gitkeep)
+eval/results/*.json
+
+# Data and runtime state
+data/
+dead_letter/
+ingest_progress.sqlite
+ingest.log
+ingest.log.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node (dashboard build artifacts)
+node_modules/
+frontend/dist/

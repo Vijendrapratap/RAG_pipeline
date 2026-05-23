@@ -1,0 +1,213 @@
+# Phase 9 golden query set. 30 hand-curated queries calibrated to the
+# Phase 3 test fixtures:
+#   - sample_whisperx.json : 3-speaker mock quarterly-review meeting
+#   - sample_plain.txt     : essay on CAP theorem / distributed systems
+#
+# Distribution per PRD §6 Phase 9:
+#   - 12 quote-finding   (q001-q012, type: quote)
+#   -  8 single-transcript Q&A (q013-q020, type: qa)
+#   -  5 cross-corpus topic    (q021-q025, type: topic)
+#   -  5 analytics             (q026-q030, type: analytics)
+#
+# For production, expand this set to cover the actual corpus. For Phase 9
+# acceptance, the requirement is Hit@5 >= 80% on quote-type queries — these
+# queries are designed to be answerable from the fixture content above.
+
+# ---- 12 quote-finding queries ----
+- id: q001
+  type: quote
+  query: "find when someone mentioned the platform team starting in January"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "platform team starting in January"
+
+- id: q002
+  type: quote
+  query: "find the line that says revenue was 47 million for the quarter"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "47 million for the quarter"
+
+- id: q003
+  type: quote
+  query: "where does someone say the mobile rewrite is on track"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "mobile rewrite is on track"
+
+- id: q004
+  type: quote
+  query: "find the mention of three enterprise customers lined up for the beta"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "three enterprise customers"
+
+- id: q005
+  type: quote
+  query: "find when someone said 'any questions before we wrap'"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "Any questions before we wrap"
+
+- id: q006
+  type: quote
+  query: "where is the CAP theorem introduced"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "CAP theorem"
+
+- id: q007
+  type: quote
+  query: "find the line about picking any two but not all three"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "any two but not all three"
+
+- id: q008
+  type: quote
+  query: "where does the essay talk about strongly consistent systems"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "strongly consistent systems"
+
+- id: q009
+  type: quote
+  query: "where is the PACELC theorem mentioned"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "PACELC theorem"
+
+- id: q010
+  type: quote
+  query: "find the line that says there are no universal right answers"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "no universal right answers"
+
+- id: q011
+  type: quote
+  query: "find the phrase 'explicit and intentional'"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "explicit and intentional"
+
+- id: q012
+  type: quote
+  query: "where is operating margin expansion mentioned"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "Operating margin expanded"
+
+# ---- 8 single-transcript Q&A ----
+- id: q013
+  type: qa
+  query: "what was Q3 revenue?"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "47 million"
+
+- id: q014
+  type: qa
+  query: "when does the new analytics dashboard launch?"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "November 8th"
+
+- id: q015
+  type: qa
+  query: "what is the CAP theorem in one sentence?"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "consistency, availability, and partition tolerance"
+
+- id: q016
+  type: qa
+  query: "when is the mobile rewrite expected to be done?"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "end of Q1 next year"
+
+- id: q017
+  type: qa
+  query: "why do banks tend to use strongly consistent systems?"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "cannot tolerate divergence"
+
+- id: q018
+  type: qa
+  query: "what does PACELC add to the CAP theorem?"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "latency"
+
+- id: q019
+  type: qa
+  query: "what is the reporting structure of the new platform team?"
+  expected_source_file: sample_whisperx.json
+  expected_chunk_contains: "reporting into engineering"
+
+- id: q020
+  type: qa
+  query: "what consistency model do social media systems usually prefer?"
+  expected_source_file: sample_plain.txt
+  expected_chunk_contains: "availability"
+
+# ---- 5 cross-corpus topic ----
+# 'topic' assertion: every file in expected_source_files must appear in top-k.
+- id: q021
+  type: topic
+  query: "discussions of trade-offs across our transcripts"
+  expected_source_files:
+    - sample_whisperx.json
+    - sample_plain.txt
+
+- id: q022
+  type: topic
+  query: "where do we talk about systems design decisions"
+  expected_source_files:
+    - sample_whisperx.json
+    - sample_plain.txt
+
+- id: q023
+  type: topic
+  query: "any discussion of databases or storage"
+  expected_source_files:
+    - sample_plain.txt
+
+- id: q024
+  type: topic
+  query: "any mention of teams or organizational structure"
+  expected_source_files:
+    - sample_whisperx.json
+
+- id: q025
+  type: topic
+  query: "any discussion of latency or performance trade-offs"
+  expected_source_files:
+    - sample_plain.txt
+
+# ---- 5 analytics ----
+- id: q026
+  type: analytics
+  tool: count_mentions
+  args:
+    term: platform
+  expected_count_min: 1
+  expected_count_max: 10
+
+- id: q027
+  type: analytics
+  tool: count_mentions
+  args:
+    term: CAP
+  expected_count_min: 1
+  expected_count_max: 10
+
+- id: q028
+  type: analytics
+  tool: list_transcripts_mentioning
+  args:
+    term: revenue
+    limit: 5
+  expected_source_files:
+    - sample_whisperx.json
+
+- id: q029
+  type: analytics
+  tool: count_mentions
+  args:
+    term: zzzqxnnonexistentphraseunicorn
+  expected_count_min: 0
+  expected_count_max: 0
+
+- id: q030
+  type: analytics
+  tool: list_transcripts_mentioning
+  args:
+    term: PACELC
+    limit: 5
+  expected_source_files:
+    - sample_plain.txt

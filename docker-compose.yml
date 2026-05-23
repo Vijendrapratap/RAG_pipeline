@@ -1,0 +1,102 @@
+# Phase F stack. Open WebUI and Redis are gone; the rag-api container
+# (FastAPI + the built React dashboard, with Tantivy BM25 in-process)
+# now serves the user-facing port 8080. The five remaining services
+# (ollama, qdrant, reranker, postgres, rag-api) are everything the
+# system needs to answer queries.
+
+services:
+  rag-api:
+    build:
+      context: .
+      dockerfile: services/rag_api/Dockerfile
+    container_name: rag-api
+    restart: unless-stopped
+    depends_on: [ollama, qdrant, postgres, reranker]
+    ports: ["8080:8080"]
+    volumes:
+      # Tantivy index built by ingestion is read in-process by the API.
+      # Read-only because the API is a reader; the ingestion job writes
+      # to the same host directory directly.
+      - ./data/tantivy:/app/data/tantivy:ro
+    environment:
+      # --- upstream services (docker DNS) ---
+      OLLAMA_URL: "http://ollama:11434"
+      QDRANT_URL: "http://qdrant:6333"
+      QDRANT_API_KEY: "${QDRANT_API_KEY}"
+      RERANKER_URL: "http://reranker:7997"
+      POSTGRES_DSN: "postgresql://owui:${POSTGRES_PASSWORD}@postgres:5432/openwebui"
+      # --- retrieval / index location ---
+      QDRANT_COLLECTION: "transcripts"
+      QDRANT_SUMMARY_COLLECTION: "transcript_summaries"
+      TANTIVY_DIR: "/app/data/tantivy"
+      EMBED_MODEL: "bge-m3"
+      # --- answer model ---
+      # Swap to the fine-tuned 26B model here once it is ready.
+      CHAT_MODEL: "${CHAT_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
+      CHAT_NUM_CTX: "${CHAT_NUM_CTX:-8192}"
+      CHAT_TEMPERATURE: "${CHAT_TEMPERATURE:-0.2}"
+      CHAT_TIMEOUT_S: "${CHAT_TIMEOUT_S:-300}"
+      # --- retrieval tuning ---
+      RAG_CANDIDATES: "${RAG_CANDIDATES:-40}"
+      RAG_TOP_K: "${RAG_TOP_K:-8}"
+      RAG_BM25_WEIGHT: "${RAG_BM25_WEIGHT:-0.65}"
+      RAG_QUOTE_BM25_WEIGHT: "${RAG_QUOTE_BM25_WEIGHT:-0.85}"
+      RAG_SUMMARY_TOP_FILES: "${RAG_SUMMARY_TOP_FILES:-6}"
+      # --- auth + CORS ---
+      DASHBOARD_PASSWORD: "${DASHBOARD_PASSWORD}"
+      # Same-origin in this container; widen only if you host the UI elsewhere.
+      RAG_CORS_ORIGINS: "${RAG_CORS_ORIGINS:-}"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports: ["11434:11434"]
+    volumes: [./data/ollama:/root/.ollama]
+    environment:
+      OLLAMA_KEEP_ALIVE: "10m"
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_FLASH_ATTENTION: "1"
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports: ["6333:6333", "6334:6334"]
+    volumes: [./data/qdrant:/qdrant/storage]
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
+      QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER: "4"
+
+  reranker:
+    image: michaelf34/infinity:latest
+    container_name: reranker
+    restart: unless-stopped
+    ports: ["7997:7997"]
+    command: >
+      v2
+      --model-id BAAI/bge-reranker-v2-m3
+      --port 7997
+      --engine torch
+      --batch-size 32
+    volumes: [./data/infinity-cache:/app/.cache]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: owui
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: openwebui
+    volumes: [./data/postgres:/var/lib/postgresql/data]
+    ports: ["5432:5432"]

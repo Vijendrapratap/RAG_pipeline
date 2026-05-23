@@ -1,0 +1,21 @@
+# Reduce the build context — only the files the Dockerfile actually COPYs
+# need to be sent to the daemon.
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+.git
+.gitignore
+.env
+data/
+dead_letter/
+logs/
+docs/
+eval/
+tests/
+ingestion/
+open_webui_functions/
+services/tantivy_server/
+frontend/node_modules
+frontend/dist
+*.md
+!README.md

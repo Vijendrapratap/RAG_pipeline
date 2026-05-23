@@ -1,0 +1,13 @@
+Today we are going to talk about distributed systems. The fundamental challenge in any distributed system is the trade-off between consistency, availability, and partition tolerance. This is known as the CAP theorem. You can pick any two but not all three at the same time.
+
+Consider a simple example. Imagine a database with two nodes located in different data centers. If the network between them fails, you have a partition. The system must now choose: either reject writes to preserve consistency, or accept writes and risk divergence. Most modern systems pick availability and eventual consistency. This works well for many workloads but is wrong for others.
+
+Financial systems generally cannot tolerate divergence. A bank cannot have two replicas show different balances after a transfer. So banks tend to use strongly consistent systems even at the cost of availability during partitions. The trade-off is explicit and intentional.
+
+Social media systems usually prefer availability. If a like or a comment shows up on one server slightly before another, no one cares. The user experience matters more than perfect ordering. So Cassandra, DynamoDB, and similar AP systems dominate that space.
+
+There is also a third dimension that people often forget: latency. Even when the network is healthy, achieving strong consistency across regions requires coordination, and coordination takes time. So in practice, consistency and latency are also in tension. This is sometimes called the PACELC theorem.
+
+When you are designing a system, the right question is not which letters of CAP or PACELC you pick in the abstract. The right question is which trade-offs match the actual requirements of your workload. Talk to the people using the system. Find out what they actually need. Then pick the model that fits.
+
+To summarize: distributed systems are about trade-offs, and there are no universal right answers. The best engineers I have worked with always start from the workload, not from the technology. That is the lesson I want you to take away from today.
