@@ -23,6 +23,9 @@ cd "$REPO_ROOT"
 YES=0
 [[ "${1:-}" == "--yes" ]] && YES=1
 
+# Phase F: the Tantivy `:8765` sidecar is gone — Tantivy now runs in-process
+# inside the rag-api container. Open WebUI and Redis are also gone.
+
 step() { echo; echo "▶ $*"; }
 ok()   { echo "  ✅ $*"; }
 warn() { echo "  ⚠️  $*"; }
@@ -90,7 +93,7 @@ ok "containers started"
 step "4/8  Wait for services to become reachable"
 # ============================================================
 
-wait_http "Open WebUI"       "http://localhost:8080/health"           90 || warn "Open WebUI not responding yet (continuing)"
+wait_http "rag-api"          "http://localhost:8080/api/health"       90 || warn "rag-api not responding yet (continuing — Postgres / Qdrant may still be cold)"
 wait_http "Ollama"           "http://localhost:11434/api/tags"        60 || die  "Ollama did not start"
 if [[ -n "${QDRANT_API_KEY:-}" ]]; then
   wait_http "Qdrant"         "http://localhost:6333/collections"      60 "api-key: $QDRANT_API_KEY" || die "Qdrant did not start"
@@ -99,9 +102,8 @@ else
 fi
 wait_http "Infinity reranker" "http://localhost:7997/health"          120 || warn "Reranker not responding (lazy-downloads on first call, may be OK)"
 
-# Postgres and Redis don't have HTTP health endpoints; check via docker.
+# Postgres has no HTTP health endpoint; check via docker.
 docker compose exec -T postgres pg_isready -U owui >/dev/null 2>&1 && ok "Postgres ready" || die "Postgres not ready"
-docker compose exec -T redis    redis-cli ping     >/dev/null 2>&1 && ok "Redis ready"    || die "Redis not ready"
 
 # ============================================================
 step "5/8  Pull Ollama models (idempotent — skips if already present)"
@@ -117,21 +119,7 @@ bash scripts/02_init_qdrant.sh   || die "Qdrant init failed"
 bash scripts/03_init_postgres.sh || die "Postgres init failed"
 
 # ============================================================
-step "7/8  Start Tantivy BM25 sidecar (host process)"
-# ============================================================
-
-if curl -fsS -m 2 http://localhost:8765/health >/dev/null 2>&1; then
-  ok "Tantivy sidecar already running"
-else
-  mkdir -p "${TANTIVY_DIR:-./data/tantivy}" logs
-  nohup bash scripts/run_tantivy_server.sh > logs/tantivy.log 2>&1 &
-  echo $! > logs/tantivy.pid
-  ok "Tantivy launched (pid $(cat logs/tantivy.pid), log: logs/tantivy.log)"
-  wait_http "Tantivy" "http://localhost:8765/health" 30 || die "Tantivy did not start — see logs/tantivy.log"
-fi
-
-# ============================================================
-step "8/8  Final health check"
+step "7/7  Final health check"
 # ============================================================
 
 bash scripts/00_health_check.sh || warn "Some health checks failed — see output above"
@@ -155,8 +143,13 @@ The system is up. Next steps (operator-triggered, in order):
        tmux new -s ingest
        python -m ingestion.bulk_ingest_hardened --chunks-dir "$PROCESSED_CHUNKS_DIR"
 
-  4. Wire up Open WebUI (one-time UI clicking):
-       docs/install_functions.md   then   docs/model_config.md
+  4. Build the file-summary index (after Phase 13 enrichment populates
+     summary_english / summary_hindi in file_meta):
+       python -m ingestion.build_summary_index
 
-Open WebUI: http://localhost:8080
+  5. Open the dashboard at http://localhost:8080 — log in with
+     $DASHBOARD_PASSWORD if you set one.
+
+Dashboard:  http://localhost:8080
+API health: http://localhost:8080/api/health
 EOF

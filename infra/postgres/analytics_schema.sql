@@ -13,7 +13,12 @@ CREATE TABLE IF NOT EXISTS chunk_meta (
 );
 CREATE INDEX IF NOT EXISTS idx_chunk_speakers ON chunk_meta USING GIN (speakers);
 CREATE INDEX IF NOT EXISTS idx_chunk_source ON chunk_meta(source_file);
-CREATE INDEX IF NOT EXISTS idx_chunk_text_fts ON chunk_meta USING GIN (to_tsvector('english', text));
+-- Full-text index for analytics. The corpus is Hindi, so the config is
+-- 'simple' (lowercase + tokenise, no English stemming or stopwords). Analytics
+-- queries in rag_api/analytics.py MUST use the same config to hit this index.
+-- A database created before this change keeps an 'english' index — rebuild it
+-- with infra/postgres/migrations/001_hindi_fts.sql.
+CREATE INDEX IF NOT EXISTS idx_chunk_text_fts ON chunk_meta USING GIN (to_tsvector('simple', text));
 
 CREATE TABLE IF NOT EXISTS file_meta (
     source_file   TEXT PRIMARY KEY,

@@ -1,5 +1,13 @@
 # User Guide — transcript-rag
 
+> ⚠️ **Phase F note.** This guide predates the custom-dashboard cutover.
+> Open WebUI and the Tantivy `:8765` sidecar are gone — the UI now lives
+> at `http://localhost:8080/` (served by the `rag-api` container), and
+> Tantivy runs in-process inside that container. Ingestion, indexing,
+> chunking, and the eval harness still work as described. For the
+> dashboard-side flow see [DASHBOARD.md](../DASHBOARD.md); for upgrading
+> an existing deployment see [../UPGRADE.md](../UPGRADE.md).
+
 End-to-end walkthrough from **"all code committed, nothing running"**
 to **"asking questions in Open WebUI and getting cited answers."**
 

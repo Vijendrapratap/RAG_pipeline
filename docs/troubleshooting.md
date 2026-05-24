@@ -1,5 +1,11 @@
 # Troubleshooting
 
+> ⚠️ **Phase F note.** Entries that mention Open WebUI, Redis, or the
+> Tantivy `:8765` sidecar describe the retired stack. The dashboard now
+> serves on `:8080` via the `rag-api` container; Tantivy runs in-process
+> inside it. Symptoms for Ollama / Qdrant / Postgres / Infinity below are
+> still accurate.
+
 Common failure modes you'll hit running transcript-rag. Each entry has a
 symptom, root cause, and fix. Pair with the [runbook](runbook.md) for
 ops procedures.

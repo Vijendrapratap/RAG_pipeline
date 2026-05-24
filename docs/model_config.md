@@ -1,5 +1,12 @@
 # Model Configuration in Open WebUI
 
+> ⚠️ **Phase F — retired.** Open WebUI is no longer in the stack and the
+> per-model system-prompt / tool-calling settings described here do not
+> apply to the new dashboard. The dashboard's answer model is set
+> entirely by `CHAT_MODEL` in `.env` (see
+> [DASHBOARD.md](../DASHBOARD.md)); there is no per-model UI to click
+> through. This document is retained only as a record of the old setup.
+
 This is the human runbook for configuring the two chat models so they
 actually invoke the Phase 7 function tools. Open WebUI does not configure
 its models automatically — every setting below has to be clicked through

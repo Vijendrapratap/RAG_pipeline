@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Health-check every service brought up by docker-compose.yml.
 # Pass: ✅; fail: ❌. Exit 0 only if all checks pass.
+#
+# Phase F: Open WebUI, Redis, and the Tantivy `:8765` sidecar are gone.
+# The dashboard + retrieval API live in the rag-api container; Tantivy
+# runs in-process inside it.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +34,7 @@ check() {
   fi
 }
 
-check "Open WebUI (8080)"  curl -fsS http://localhost:8080/health
+check "rag-api (8080)"     curl -fsS http://localhost:8080/api/health
 check "Ollama (11434)"     curl -fsS http://localhost:11434/api/tags
 
 if [[ -n "$QDRANT_API_KEY" ]]; then
@@ -41,7 +45,6 @@ fi
 
 check "Infinity (7997)"    curl -fsS http://localhost:7997/health
 check "Postgres (5432)"    pg_isready -h localhost -p 5432 -U owui
-check "Redis (6379)"       redis-cli -h localhost ping
 
 echo
 echo "$PASS passed, $FAIL failed"

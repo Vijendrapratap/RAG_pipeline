@@ -1,5 +1,13 @@
 # Runbook — daily ops, backup, recovery
 
+> ⚠️ **Phase F note.** Sections that mention Open WebUI, Redis, or the
+> Tantivy `:8765` sidecar describe the retired stack. The systemd unit
+> for the host-side sidecar is no longer needed: Tantivy now runs
+> in-process inside the `rag-api` container, reading the same
+> `data/tantivy/` directory ingestion writes to. Backup (`pg_dump`,
+> Qdrant snapshots, Tantivy rsync) is unchanged. See
+> [DASHBOARD.md](../DASHBOARD.md) for the current service layout.
+
 Operational reference for a running `transcript-rag` deployment.
 Architecture: [architecture.md](architecture.md). Failure modes:
 [troubleshooting.md](troubleshooting.md). One-time Open WebUI function

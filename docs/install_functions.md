@@ -1,5 +1,13 @@
 # Installing the Open WebUI Function Tools
 
+> ⚠️ **Phase F — retired.** Open WebUI is no longer part of the deployed
+> stack. The retrieval and analytics that used to be exposed as function
+> tools are now first-class endpoints on the dashboard API
+> (`POST /api/query`, `POST /api/search`, `GET /api/analytics/*`). See
+> [DASHBOARD.md](../DASHBOARD.md) for the new setup. This document is
+> kept only as a historical record and for the legacy `eval/run_eval.py`
+> harness, which still imports `open_webui_functions/` directly.
+
 These instructions add the Phase 7 retrieval and analytics tools to Open
 WebUI so chat models can call them. One-time setup, ~5 minutes per tool.
 

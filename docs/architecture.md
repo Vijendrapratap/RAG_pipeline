@@ -1,5 +1,13 @@
 # Architecture
 
+> ⚠️ **Phase F note.** The diagram and component list below describe the
+> original Open WebUI + Tantivy-sidecar stack. In the current deployment
+> Open WebUI and Redis are gone, the `:8765` Tantivy sidecar runs
+> in-process inside the new `rag-api` container, and the React dashboard
+> is served from the same container at `/`. The retrieval *core* (Qdrant
+> dense + Tantivy BM25 + weighted RRF + bge-reranker-v2-m3) is unchanged —
+> see [DASHBOARD.md](../DASHBOARD.md) for the current architecture.
+
 ```
 ┌─────────────────────────── RTX 5070 host (Ubuntu 22.04+) ──────────────────────────┐
 │                                                                                     │
@@ -43,8 +51,8 @@ host-side sidecar. Everything is open-source.
    chunks back to the chat model.
 4. **For analytics tools:** the tool runs a single parameterized SQL
    query against Postgres (`chunk_meta` table with GIN indexes on
-   `speakers` and `to_tsvector('english', text)`) with a 10s
-   `statement_timeout`.
+   `speakers` and `to_tsvector('simple', text)` — the `'simple'` config
+   is correct for the Hindi corpus) with a 10s `statement_timeout`.
 5. The chat model composes the user-facing answer, citing the chunks
    surfaced by retrieval (`self.citation = True` on the tool surfaces
    citation badges in the UI).
@@ -148,7 +156,8 @@ quality.
 - **Open WebUI app database** (`DATABASE_URL`).
 - **Analytics** (`chunk_meta`, `file_meta` — created in Phase 6). GIN
   index on `speakers TEXT[]` for speaker filters and on
-  `to_tsvector('english', text)` for full-text counts.
+  `to_tsvector('simple', text)` for full-text counts (`'simple'` rather
+  than `'english'` — the corpus is Hindi).
 
 **Failure modes.** Analytics returns 0 for everything → schema not
 applied or ingester ran before Phase 6 schema existed

@@ -1,43 +1,51 @@
-version: '3.9'
+# Phase F stack. Open WebUI and Redis are gone; the rag-api container
+# (FastAPI + the built React dashboard, with Tantivy BM25 in-process)
+# now serves the user-facing port 8080. The five remaining services
+# (ollama, qdrant, reranker, postgres, rag-api) are everything the
+# system needs to answer queries.
 
 services:
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
+  rag-api:
+    build:
+      context: .
+      dockerfile: services/rag_api/Dockerfile
+    container_name: rag-api
     restart: unless-stopped
-    depends_on: [ollama, qdrant, postgres, redis, reranker]
+    depends_on: [ollama, qdrant, postgres, reranker]
     ports: ["8080:8080"]
     volumes:
-      - ./data/open-webui:/app/backend/data
+      # Tantivy index built by ingestion is read in-process by the API.
+      # Read-only because the API is a reader; the ingestion job writes
+      # to the same host directory directly.
+      - ./data/tantivy:/app/data/tantivy:ro
     environment:
-      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"
-      ENV: prod
-      DATABASE_URL: "postgresql://owui:${POSTGRES_PASSWORD}@postgres:5432/openwebui"
-      REDIS_URL: "redis://redis:6379/0"
-      ENABLE_BASE_MODELS_CACHE: "True"
-      ENABLE_REALTIME_CHAT_SAVE: "False"
-      OLLAMA_BASE_URL: "http://ollama:11434"
-      VECTOR_DB: "qdrant"
-      QDRANT_URI: "http://qdrant:6333"
+      # --- upstream services (docker DNS) ---
+      OLLAMA_URL: "http://ollama:11434"
+      QDRANT_URL: "http://qdrant:6333"
       QDRANT_API_KEY: "${QDRANT_API_KEY}"
-      RAG_EMBEDDING_ENGINE: "ollama"
-      RAG_EMBEDDING_MODEL: "bge-m3"
-      RAG_OLLAMA_BASE_URL: "http://ollama:11434"
-      RAG_EMBEDDING_BATCH_SIZE: "32"
-      ENABLE_RAG_HYBRID_SEARCH: "true"
-      RAG_RERANKING_ENGINE: "external"
-      RAG_EXTERNAL_RERANKER_URL: "http://reranker:7997/rerank"
-      RAG_RERANKING_MODEL: "BAAI/bge-reranker-v2-m3"
-      RAG_TOP_K: "40"
-      RAG_TOP_K_RERANKER: "8"
-      RAG_HYBRID_BM25_WEIGHT: "0.65"
-      RAG_TEXT_SPLITTER: "token"
-      CHUNK_SIZE: "600"
-      CHUNK_OVERLAP: "150"
-      CHUNK_MIN_SIZE_TARGET: "350"
-      RAG_SYSTEM_CONTEXT: "True"
-      RAG_FILE_MAX_SIZE: "1000"
-      RAG_FILE_MAX_COUNT: "100"
+      RERANKER_URL: "http://reranker:7997"
+      POSTGRES_DSN: "postgresql://owui:${POSTGRES_PASSWORD}@postgres:5432/openwebui"
+      # --- retrieval / index location ---
+      QDRANT_COLLECTION: "transcripts"
+      QDRANT_SUMMARY_COLLECTION: "transcript_summaries"
+      TANTIVY_DIR: "/app/data/tantivy"
+      EMBED_MODEL: "bge-m3"
+      # --- answer model ---
+      # Swap to the fine-tuned 26B model here once it is ready.
+      CHAT_MODEL: "${CHAT_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
+      CHAT_NUM_CTX: "${CHAT_NUM_CTX:-8192}"
+      CHAT_TEMPERATURE: "${CHAT_TEMPERATURE:-0.2}"
+      CHAT_TIMEOUT_S: "${CHAT_TIMEOUT_S:-300}"
+      # --- retrieval tuning ---
+      RAG_CANDIDATES: "${RAG_CANDIDATES:-40}"
+      RAG_TOP_K: "${RAG_TOP_K:-8}"
+      RAG_BM25_WEIGHT: "${RAG_BM25_WEIGHT:-0.65}"
+      RAG_QUOTE_BM25_WEIGHT: "${RAG_QUOTE_BM25_WEIGHT:-0.85}"
+      RAG_SUMMARY_TOP_FILES: "${RAG_SUMMARY_TOP_FILES:-6}"
+      # --- auth + CORS ---
+      DASHBOARD_PASSWORD: "${DASHBOARD_PASSWORD}"
+      # Same-origin in this container; widen only if you host the UI elsewhere.
+      RAG_CORS_ORIGINS: "${RAG_CORS_ORIGINS:-}"
 
   ollama:
     image: ollama/ollama:latest
@@ -92,10 +100,3 @@ services:
       POSTGRES_DB: openwebui
     volumes: [./data/postgres:/var/lib/postgresql/data]
     ports: ["5432:5432"]
-
-  redis:
-    image: redis:7-alpine
-    container_name: redis
-    restart: unless-stopped
-    command: redis-server --maxclients 10000 --timeout 1800
-    volumes: [./data/redis:/data]

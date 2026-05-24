@@ -1,0 +1,458 @@
+"""FastAPI backend for the transcript-RAG dashboard.
+
+Endpoints:
+  GET  /api/health              — service reachability + index status (no auth)
+  POST /api/search              — hybrid retrieval, structured JSON results
+  POST /api/query               — full RAG turn, bilingual answer (+ streaming)
+  POST /api/tantivy/reload      — re-open the BM25 index after fresh ingestion
+  GET  /api/filters             — distinct metadata values for UI dropdowns
+  GET  /api/analytics/mentions  — full-text mention count for a term
+  GET  /api/analytics/speakers  — speakers ranked by mentions of a term
+  GET  /api/analytics/transcripts — transcripts ranked by mentions of a term
+
+Search / query requests carry two Phase-D quality switches: `auto_filters`
+(extract metadata filters from the query text) and `expand_query` (HyDE).
+
+Run locally:
+    uvicorn rag_api.app:app --host 0.0.0.0 --port 8080
+or:
+    python -m rag_api.app
+"""
+from __future__ import annotations
+
+import json
+import logging
+import secrets
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Literal
+
+import requests
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from rag_api.analytics import Analytics
+from rag_api.config import Settings, get_settings
+from rag_api.db import VocabCache
+from rag_api.lang import resolve_language
+from rag_api.query_parse import detect_signals, merge_filters, signals_to_filters
+from rag_api.retrieval import Retriever
+from rag_api.synthesis import Synthesizer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("rag_api.app")
+
+
+# --------------------------------------------------------------------------
+# Request models
+# --------------------------------------------------------------------------
+
+
+class FilterModel(BaseModel):
+    """Optional metadata filters. All default to None (no constraint)."""
+
+    speaker: str | None = None
+    source_file: str | None = None
+    season: str | None = None
+    track_type: list[str] | str | None = None
+    location: str | None = None
+    event_id: str | None = None
+    date_range: tuple[str, str] | None = None
+    event_type: str | None = None
+    primary_language: str | None = None
+    topics: list[str] | None = None
+    people_named: list[str] | None = None
+    scriptures_referenced: list[str] | None = None
+
+
+# Retrieval scope:
+#   chunks    — hybrid chunk search (default; unchanged behaviour)
+#   summaries — file-level summary search (cross-corpus / topic questions)
+#   two_stage — summary search picks files, then chunk search within them
+RetrievalScope = Literal["chunks", "summaries", "two_stage"]
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    find_quote: bool = False
+    scope: RetrievalScope = "chunks"
+    top_k: int = Field(8, ge=1, le=40)
+    filters: FilterModel = Field(default_factory=FilterModel)
+    # Extract metadata filters from the query text. Strong signals (years,
+    # ISO dates) are applied; soft ones (season/topic words) are only
+    # reported as suggestions. See rag_api.query_parse.
+    auto_filters: bool = True
+    # Expand the query with a HyDE hypothetical passage before dense search.
+    # One extra chat-model call — opt-in.
+    expand_query: bool = False
+
+
+class QueryRequest(BaseModel):
+    """A full RAG turn: retrieve, then synthesise a bilingual answer."""
+
+    query: str = Field(..., min_length=1)
+    find_quote: bool = False
+    scope: RetrievalScope = "chunks"
+    top_k: int = Field(8, ge=1, le=40)
+    filters: FilterModel = Field(default_factory=FilterModel)
+    auto_filters: bool = True
+    expand_query: bool = False
+    # 'auto' detects Hindi/English from the query; the others force it.
+    answer_language: Literal["auto", "hindi", "english"] = "auto"
+    # When true, the answer is streamed back as Server-Sent Events.
+    stream: bool = False
+
+
+# --------------------------------------------------------------------------
+# App + lifespan
+# --------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    app.state.settings = settings
+    app.state.retriever = Retriever(settings)
+    app.state.synthesizer = Synthesizer(settings)
+    app.state.analytics = Analytics(settings.pg_dsn)
+    app.state.vocab_cache = VocabCache()
+    log.info(
+        "rag_api up — collection=%s bm25=%s chat=%s auth=%s",
+        settings.qdrant_collection,
+        app.state.retriever.bm25_enabled,
+        settings.chat_model,
+        "on" if settings.dashboard_password else "OFF (dev)",
+    )
+    yield
+
+
+app = FastAPI(title="transcript-rag dashboard API", version="0.1.0",
+              lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_settings().cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --------------------------------------------------------------------------
+# Auth — shared password via X-Dashboard-Password header
+# --------------------------------------------------------------------------
+
+
+def require_auth(
+    x_dashboard_password: str | None = Header(default=None),
+) -> None:
+    """Reject requests whose password header doesn't match the configured
+    shared password. If no password is configured, auth is disabled (dev)."""
+    expected = get_settings().dashboard_password
+    if not expected:
+        return
+    if not x_dashboard_password or not secrets.compare_digest(
+        x_dashboard_password, expected
+    ):
+        raise HTTPException(status_code=401,
+                            detail="invalid or missing dashboard password")
+
+
+# --------------------------------------------------------------------------
+# Endpoints
+# --------------------------------------------------------------------------
+
+
+def _probe(url: str, headers: dict[str, str] | None = None) -> bool:
+    try:
+        r = requests.get(url, headers=headers or {}, timeout=3)
+        return r.status_code < 500
+    except requests.RequestException:
+        return False
+
+
+def _check_services(s: Settings) -> dict[str, bool]:
+    return {
+        "ollama": _probe(f"{s.ollama_url}/api/tags"),
+        "qdrant": _probe(
+            f"{s.qdrant_url}/collections",
+            headers={"api-key": s.qdrant_key} if s.qdrant_key else None,
+        ),
+        "reranker": _probe(f"{s.reranker_url.rstrip('/')}/health"),
+    }
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    """Service reachability + index status. Unauthenticated by design so a
+    monitor / the login screen can probe it."""
+    s: Settings = app.state.settings
+    retriever: Retriever = app.state.retriever
+    services = _check_services(s)
+    return {
+        "ok": services["ollama"] and services["qdrant"],
+        "services": services,
+        "bm25_enabled": retriever.bm25_enabled,
+        "tantivy_docs": retriever.tantivy_doc_count(),
+        "auth_required": bool(s.dashboard_password),
+        "chat_model": s.chat_model,
+        "embed_model": s.embed_model,
+    }
+
+
+def _retrieve(
+    retriever: Retriever, query: str, find_quote: bool, scope: str,
+    filters: dict[str, Any], top_k: int, dense_text: str,
+) -> list[dict[str, Any]]:
+    """Route a retrieval request to the right pipeline. `find_quote` is
+    always a chunk-level quote hunt, so scope is ignored when it is set."""
+    if find_quote:
+        return retriever.find_quote(query, top_k)
+    dt = dense_text or None
+    if scope == "summaries":
+        return retriever.search_summaries(query, filters, top_k, dense_text=dt)
+    if scope == "two_stage":
+        return retriever.search_two_stage(query, filters, top_k, dense_text=dt)
+    return retriever.search(query, filters, top_k, dense_text=dt)
+
+
+def _prepare(req: SearchRequest | QueryRequest) -> tuple[
+    dict[str, Any], list[dict[str, Any]], str
+]:
+    """Phase-D pre-retrieval planning, shared by /api/search and /api/query.
+
+    Returns ``(effective_filters, detections, dense_text)``:
+      * effective_filters — explicit request filters merged with auto-extracted
+        strong signals (explicit always wins);
+      * detections — every signal found in the query text, for the UI to show
+        as removable / applyable chips;
+      * dense_text — a HyDE hypothetical passage when `expand_query` is set,
+        else "".
+
+    A `find_quote` request skips both: it is a lexical exact-phrase hunt, so
+    metadata filters and semantic expansion do not apply.
+    """
+    if req.find_quote:
+        return {}, [], ""
+
+    s: Settings = app.state.settings
+    explicit = {k: v for k, v in req.filters.model_dump().items()
+                if v is not None}
+    vocab = app.state.vocab_cache.get(s.pg_dsn)
+    detections = detect_signals(req.query, vocab)
+    auto = signals_to_filters(detections) if req.auto_filters else {}
+    effective = merge_filters(explicit, auto)
+
+    dense_text = ""
+    if req.expand_query:
+        dense_text = app.state.retriever.make_expansion(req.query)
+
+    return effective, detections, dense_text
+
+
+@app.post("/api/search", dependencies=[Depends(require_auth)])
+def search(req: SearchRequest) -> dict[str, Any]:
+    """Retrieval only — structured results, no LLM synthesis (that is
+    POST /api/query). `scope` selects chunk / summary / two-stage retrieval."""
+    retriever: Retriever = app.state.retriever
+    effective, detections, dense_text = _prepare(req)
+    try:
+        results = _retrieve(retriever, req.query, req.find_quote, req.scope,
+                            effective, req.top_k, dense_text)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502,
+                            detail=f"upstream service error: {e}")
+    except Exception as e:  # noqa: BLE001 - surface, don't swallow
+        log.error("search failed for %r: %s", req.query, e)
+        raise HTTPException(status_code=500, detail=f"retrieval failed: {e}")
+    return {
+        "query": req.query,
+        "find_quote": req.find_quote,
+        "scope": req.scope,
+        "count": len(results),
+        "results": results,
+        "detected_filters": detections,
+        "applied_filters": effective,
+        "expanded": bool(dense_text),
+    }
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """Format one Server-Sent Event. ensure_ascii=False keeps Devanagari
+    intact on the wire (the response is UTF-8)."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/query", dependencies=[Depends(require_auth)])
+def query(req: QueryRequest):
+    """Full RAG turn: retrieve transcript passages, then synthesise a
+    bilingual, citation-grounded answer.
+
+    Non-streaming (`stream=false`): returns one JSON object with `answer`
+    and `citations`. Streaming (`stream=true`): returns Server-Sent Events —
+    a `meta` event (language + citations), then `token` events with answer
+    deltas, then `done` (or `error`).
+    """
+    retriever: Retriever = app.state.retriever
+    synthesizer: Synthesizer = app.state.synthesizer
+
+    effective, detections, dense_text = _prepare(req)
+    try:
+        results = _retrieve(retriever, req.query, req.find_quote, req.scope,
+                            effective, req.top_k, dense_text)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502,
+                            detail=f"upstream service error: {e}")
+    except Exception as e:  # noqa: BLE001 - surface, don't swallow
+        log.error("query retrieval failed for %r: %s", req.query, e)
+        raise HTTPException(status_code=500, detail=f"retrieval failed: {e}")
+
+    answer_language = resolve_language(req.answer_language, req.query)
+
+    if not req.stream:
+        try:
+            answer = synthesizer.generate(req.query, results, answer_language)
+        except requests.RequestException as e:
+            raise HTTPException(status_code=502,
+                                detail=f"answer model error: {e}")
+        return {
+            "query": req.query,
+            "find_quote": req.find_quote,
+            "scope": req.scope,
+            "answer_language": answer_language,
+            "answer": answer,
+            "count": len(results),
+            "citations": results,
+            "detected_filters": detections,
+            "applied_filters": effective,
+            "expanded": bool(dense_text),
+        }
+
+    def event_stream():
+        yield _sse("meta", {
+            "query": req.query,
+            "find_quote": req.find_quote,
+            "scope": req.scope,
+            "answer_language": answer_language,
+            "count": len(results),
+            "citations": results,
+            "detected_filters": detections,
+            "applied_filters": effective,
+            "expanded": bool(dense_text),
+        })
+        try:
+            for delta in synthesizer.stream(req.query, results, answer_language):
+                yield _sse("token", {"text": delta})
+        except requests.RequestException as e:
+            log.error("answer streaming failed for %r: %s", req.query, e)
+            yield _sse("error", {"detail": f"answer model error: {e}"})
+        else:
+            yield _sse("done", {})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/tantivy/reload", dependencies=[Depends(require_auth)])
+def tantivy_reload() -> dict[str, Any]:
+    """Re-open the BM25 index — call after ingesting new transcripts."""
+    retriever: Retriever = app.state.retriever
+    docs = retriever.reload_tantivy()
+    return {"ok": True, "bm25_enabled": retriever.bm25_enabled, "docs": docs}
+
+
+@app.get("/api/filters", dependencies=[Depends(require_auth)])
+def filter_options() -> dict[str, Any]:
+    """Distinct metadata values for the dashboard's filter dropdowns,
+    sourced from Postgres file_meta via the shared TTL cache (also used by
+    query-time filter extraction). db_ok=false means the cache has never
+    loaded — the dashboard still renders, with empty dropdowns."""
+    s: Settings = app.state.settings
+    cache: VocabCache = app.state.vocab_cache
+    options = cache.get(s.pg_dsn)
+    return {"db_ok": cache.ok, "options": options}
+
+
+# --------------------------------------------------------------------------
+# Analytics — Postgres-backed corpus statistics (no LLM)
+# --------------------------------------------------------------------------
+
+
+def _run_analytics(label: str, fn, *args: Any) -> dict[str, Any]:
+    """Call an analytics method, mapping failures to a 502 instead of a 500 —
+    analytics is a Postgres dependency, like the retrieval upstreams."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001 - surface, don't swallow
+        log.error("analytics %s failed for %r: %s", label, args, e)
+        raise HTTPException(status_code=502, detail=f"analytics query failed: {e}")
+
+
+@app.get("/api/analytics/mentions", dependencies=[Depends(require_auth)])
+def analytics_mentions(
+    term: str = Query(..., min_length=1),
+    speaker: str | None = None,
+) -> dict[str, Any]:
+    """How many chunks mention `term` (full-text), optionally for one speaker."""
+    a: Analytics = app.state.analytics
+    return _run_analytics("mentions", a.count_mentions, term, speaker)
+
+
+@app.get("/api/analytics/speakers", dependencies=[Depends(require_auth)])
+def analytics_speakers(
+    term: str = Query(..., min_length=1),
+    limit: int = Query(10, ge=1, le=100),
+) -> dict[str, Any]:
+    """Speakers ranked by how many `term`-matching chunks they appear in."""
+    a: Analytics = app.state.analytics
+    return _run_analytics("speakers", a.top_speakers, term, limit)
+
+
+@app.get("/api/analytics/transcripts", dependencies=[Depends(require_auth)])
+def analytics_transcripts(
+    term: str = Query(..., min_length=1),
+    limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
+    """Transcript files ranked by how many `term`-matching chunks they hold."""
+    a: Analytics = app.state.analytics
+    return _run_analytics("transcripts", a.list_transcripts, term, limit)
+
+
+# --------------------------------------------------------------------------
+# Static dashboard — Phase F. The Vite build output is served at `/` so the
+# same container ships both the API and the UI. Mounted *after* the API
+# routes so /api/* is never shadowed; absent in dev (where Vite serves the
+# UI on :5173 and proxies /api → :8080).
+# --------------------------------------------------------------------------
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _STATIC_DIR.is_dir():
+    # `html=True` makes StaticFiles return `index.html` for `/` and any
+    # directory request — enough for this single-page UI (no client router).
+    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True),
+              name="dashboard")
+    log.info("dashboard static files mounted from %s", _STATIC_DIR)
+else:
+    log.info("no dashboard build at %s — running API only (dev mode)",
+             _STATIC_DIR)
+
+
+def main() -> None:
+    import uvicorn
+
+    s = get_settings()
+    uvicorn.run("rag_api.app:app", host=s.api_host, port=s.api_port,
+                log_level="info")
+
+
+if __name__ == "__main__":
+    main()
