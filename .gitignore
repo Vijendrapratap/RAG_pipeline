@@ -3,6 +3,7 @@
 
 # Secrets and local overrides
 .env
+.env.*.local
 docker-compose.override.yml
 
 # Local-only build log (per user decision 2026-05-17)
@@ -17,14 +18,32 @@ dead_letter/
 ingest_progress.sqlite
 ingest.log
 ingest.log.*
+logs/*
+!logs/.gitkeep
 
 # Python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
+venv/
 *.egg-info/
+build/
+dist/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Node (dashboard build artifacts)
 node_modules/
 frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
