@@ -31,11 +31,26 @@ services:
       TANTIVY_DIR: "/app/data/tantivy"
       EMBED_MODEL: "bge-m3"
       # --- answer model ---
-      # Swap to the fine-tuned 26B model here once it is ready.
+      # CHAT_PROVIDER selects which backend writes the final answer:
+      #   "ollama" (default, strictly local) or "openrouter" (opt-in cloud).
+      # When openrouter, retrieved chunks leave the host — gated trade-off.
+      CHAT_PROVIDER: "${CHAT_PROVIDER:-ollama}"
+      # Ollama path — swap to the fine-tuned 26B model here once it is ready.
       CHAT_MODEL: "${CHAT_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
       CHAT_NUM_CTX: "${CHAT_NUM_CTX:-8192}"
       CHAT_TEMPERATURE: "${CHAT_TEMPERATURE:-0.2}"
       CHAT_TIMEOUT_S: "${CHAT_TIMEOUT_S:-300}"
+      # OpenRouter path — only read when CHAT_PROVIDER=openrouter. Empty key
+      # is fine when running in local mode; populate it in `.env` to enable.
+      OPENROUTER_URL: "${OPENROUTER_URL:-https://openrouter.ai/api/v1}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-qwen/qwen3.6-27b}"
+      OPENROUTER_MAX_TOKENS: "${OPENROUTER_MAX_TOKENS:-4096}"
+      OPENROUTER_REFERER: "${OPENROUTER_REFERER:-}"
+      OPENROUTER_TITLE: "${OPENROUTER_TITLE:-transcript-rag}"
+      # --- frontend model dropdown (extras; defaults always added) ---
+      AVAILABLE_OLLAMA_MODELS: "${AVAILABLE_OLLAMA_MODELS:-}"
+      AVAILABLE_OPENROUTER_MODELS: "${AVAILABLE_OPENROUTER_MODELS:-}"
       # --- retrieval tuning ---
       RAG_CANDIDATES: "${RAG_CANDIDATES:-40}"
       RAG_TOP_K: "${RAG_TOP_K:-8}"

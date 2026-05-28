@@ -36,8 +36,11 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
   return (
     <div className="login">
       <form className="login-card" onSubmit={submit}>
-        <h1>Transcript RAG</h1>
-        <p className="muted">Enter the dashboard password to continue.</p>
+        <div className="login-brand">
+          <span className="brand-mark" aria-hidden="true">V</span>
+          <h1>Vishvas RAG</h1>
+        </div>
+        <p>Enter the dashboard password to continue.</p>
         <input
           type="password"
           value={value}

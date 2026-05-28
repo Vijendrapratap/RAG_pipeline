@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from rag_api.analytics import Analytics
 from rag_api.config import Settings, get_settings
 from rag_api.db import VocabCache
+from rag_api.history import History
 from rag_api.lang import resolve_language
 from rag_api.query_parse import detect_signals, merge_filters, signals_to_filters
 from rag_api.retrieval import Retriever
@@ -107,6 +108,11 @@ class QueryRequest(BaseModel):
     answer_language: Literal["auto", "hindi", "english"] = "auto"
     # When true, the answer is streamed back as Server-Sent Events.
     stream: bool = False
+    # Optional per-request model override. Both must be set together and
+    # must match an entry in /api/models — see `Settings.is_model_allowed`.
+    # When omitted, the env-configured default is used.
+    provider: Literal["ollama", "openrouter"] | None = None
+    model: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -121,12 +127,14 @@ async def lifespan(app: FastAPI):
     app.state.retriever = Retriever(settings)
     app.state.synthesizer = Synthesizer(settings)
     app.state.analytics = Analytics(settings.pg_dsn)
+    app.state.history = History(settings.pg_dsn)
     app.state.vocab_cache = VocabCache()
     log.info(
-        "rag_api up — collection=%s bm25=%s chat=%s auth=%s",
+        "rag_api up — collection=%s bm25=%s chat=%s/%s auth=%s",
         settings.qdrant_collection,
         app.state.retriever.bm25_enabled,
-        settings.chat_model,
+        app.state.synthesizer.provider,
+        app.state.synthesizer.active_model,
         "on" if settings.dashboard_password else "OFF (dev)",
     )
     yield
@@ -188,20 +196,68 @@ def _check_services(s: Settings) -> dict[str, bool]:
     }
 
 
+@app.get("/api/models")
+def list_models() -> dict[str, Any]:
+    """Selectable models for the dashboard's Model dropdown.
+
+    Unauthenticated by design — same posture as /api/health — so the login
+    screen / public probe can read it. Returns only model IDs and labels;
+    no API keys, no URLs, no secrets.
+    """
+    s: Settings = app.state.settings
+    return {"models": s.available_models()}
+
+
+def _resolve_model_choice(
+    req: QueryRequest | SearchRequest,
+) -> tuple[str | None, str | None]:
+    """Validate the per-request provider+model override.
+
+    Returns ``(provider, model)`` to pass through to the Synthesizer, or
+    ``(None, None)`` when no override was supplied (use env defaults).
+    Raises 400 on a malformed override (one field without the other, or a
+    model not on the env allowlist).
+    """
+    p, m = getattr(req, "provider", None), getattr(req, "model", None)
+    if p is None and m is None:
+        return None, None
+    if (p is None) != (m is None):
+        raise HTTPException(
+            status_code=400,
+            detail="provider and model must be set together",
+        )
+    s: Settings = app.state.settings
+    if not s.is_model_allowed(p, m):
+        raise HTTPException(
+            status_code=400,
+            detail=f"model {p}/{m} is not in the configured allowlist",
+        )
+    return p, m
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     """Service reachability + index status. Unauthenticated by design so a
     monitor / the login screen can probe it."""
     s: Settings = app.state.settings
     retriever: Retriever = app.state.retriever
+    synth: Synthesizer = app.state.synthesizer
     services = _check_services(s)
+    # When CHAT_PROVIDER=openrouter, Ollama may still be running for
+    # embeddings — keep the health check honest about what's actually
+    # required for /api/query to work.
+    chat_reachable = (
+        services["ollama"] if synth.provider == "ollama"
+        else bool(s.openrouter_api_key)
+    )
     return {
-        "ok": services["ollama"] and services["qdrant"],
+        "ok": chat_reachable and services["qdrant"],
         "services": services,
         "bm25_enabled": retriever.bm25_enabled,
         "tantivy_docs": retriever.tantivy_doc_count(),
         "auth_required": bool(s.dashboard_password),
-        "chat_model": s.chat_model,
+        "chat_provider": synth.provider,
+        "chat_model": synth.active_model,
         "embed_model": s.embed_model,
     }
 
@@ -302,6 +358,9 @@ def query(req: QueryRequest):
     retriever: Retriever = app.state.retriever
     synthesizer: Synthesizer = app.state.synthesizer
 
+    # Per-request model override (400 if malformed). None,None = env default.
+    override_provider, override_model = _resolve_model_choice(req)
+
     effective, detections, dense_text = _prepare(req)
     try:
         results = _retrieve(retriever, req.query, req.find_quote, req.scope,
@@ -317,7 +376,10 @@ def query(req: QueryRequest):
 
     if not req.stream:
         try:
-            answer = synthesizer.generate(req.query, results, answer_language)
+            answer = synthesizer.generate(
+                req.query, results, answer_language,
+                provider=override_provider, model=override_model,
+            )
         except requests.RequestException as e:
             raise HTTPException(status_code=502,
                                 detail=f"answer model error: {e}")
@@ -347,7 +409,10 @@ def query(req: QueryRequest):
             "expanded": bool(dense_text),
         })
         try:
-            for delta in synthesizer.stream(req.query, results, answer_language):
+            for delta in synthesizer.stream(
+                req.query, results, answer_language,
+                provider=override_provider, model=override_model,
+            ):
                 yield _sse("token", {"text": delta})
         except requests.RequestException as e:
             log.error("answer streaming failed for %r: %s", req.query, e)
@@ -425,6 +490,83 @@ def analytics_transcripts(
     """Transcript files ranked by how many `term`-matching chunks they hold."""
     a: Analytics = app.state.analytics
     return _run_analytics("transcripts", a.list_transcripts, term, limit)
+
+
+# --------------------------------------------------------------------------
+# Conversation history — Postgres-backed Q&A log for the sidebar
+# --------------------------------------------------------------------------
+
+
+class HistorySaveRequest(BaseModel):
+    """One completed Q&A turn the dashboard wants to persist.
+
+    Mirrors the data the UI already has after a /api/query response — we just
+    forward it to Postgres. The full citation list and applied/detected
+    filters ride along as JSONB so the read-only viewer can re-render the
+    exact past answer without re-running retrieval.
+    """
+
+    question: str = Field(..., min_length=1)
+    answer: str = ""
+    mode: Literal["answer", "search"] = "answer"
+    scope: RetrievalScope = "chunks"
+    top_k: int = Field(8, ge=1, le=40)
+    find_quote: bool = False
+    expanded: bool = False
+    answer_language: str | None = None
+    filters: dict[str, Any] = Field(default_factory=dict)
+    applied_filters: dict[str, Any] = Field(default_factory=dict)
+    detected_filters: list[dict[str, Any]] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def _run_history(label: str, fn, *args: Any) -> Any:
+    """Call a history method, mapping infra failures to 502 like analytics."""
+    try:
+        return fn(*args)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001 - surface, don't swallow
+        log.error("history %s failed for %r: %s", label, args, e)
+        raise HTTPException(status_code=502, detail=f"history query failed: {e}")
+
+
+@app.get("/api/history", dependencies=[Depends(require_auth)])
+def history_list(
+    limit: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
+    """Sidebar listing — id, title, created_at, mode, scope (no bodies)."""
+    h: History = app.state.history
+    items = _run_history("list", h.list_summaries, limit)
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/history/{conversation_id}", dependencies=[Depends(require_auth)])
+def history_get(conversation_id: str) -> dict[str, Any]:
+    """Full conversation record for the read-only viewer."""
+    h: History = app.state.history
+    record = _run_history("get", h.get, conversation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return record
+
+
+@app.post("/api/history", dependencies=[Depends(require_auth)])
+def history_save(req: HistorySaveRequest) -> dict[str, Any]:
+    """Persist one completed Q&A turn. Returns the saved record."""
+    h: History = app.state.history
+    return _run_history("save", h.save, req.model_dump())
+
+
+@app.delete("/api/history/{conversation_id}",
+            dependencies=[Depends(require_auth)])
+def history_delete(conversation_id: str) -> dict[str, Any]:
+    """Remove one conversation by id."""
+    h: History = app.state.history
+    deleted = _run_history("delete", h.delete, conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"ok": True, "id": conversation_id}
 
 
 # --------------------------------------------------------------------------

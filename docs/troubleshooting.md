@@ -241,6 +241,163 @@ python -m ingestion.bulk_ingest_hardened --chunks-dir /data/processed
 
 ---
 
+## Dashboard 502s + "relation does not exist" after a Windows / Docker restart
+
+**Symptom.** After rebooting Windows, restarting Docker Desktop, or
+returning from sleep, the dashboard breaks:
+
+- `/api/query`, `/api/analytics/*` return `502 Bad Gateway`
+- `/api/health` reports `bm25_enabled: false` and `tantivy_docs: 0`
+- Postgres errors: `relation "file_meta" does not exist` or
+  `relation "chunk_meta" does not exist`
+- Sidebar shows "no chats yet" even though there were entries yesterday
+
+Inside the containers, the bind-mounted dirs look fresh-initialised
+(empty Qdrant collections, fresh `initdb`-style Postgres files dated
+today, empty Ollama `models/manifests/`). **But on the WSL host,
+`~/transcript-rag-data/{postgres,qdrant,ollama}` is still fully
+populated** with yesterday's data and old timestamps.
+
+**Cause.** Docker Desktop on Windows + WSL2 + bind mounts has a startup
+race. The daemon runs in the `docker-desktop` WSL distro; bind-mount
+sources live in `Ubuntu-24.04` (the user's home). On a cold start, the
+containers can come up *before* the 9P bridge between those two distros
+is fully re-established. Each container then sees an empty version of
+its mount target and acts on it:
+
+- **Postgres** finds no `PG_VERSION`, but by the time it would run
+  `initdb` the bridge has partially recovered — it ends up in a
+  confused half-loaded state where some tables are visible and others
+  aren't. Analytics queries hit the missing ones and 502.
+- **Qdrant** starts with an empty `storage/collections/` and writes a
+  fresh `raft_state.json` on top, clobbering the host-side directory.
+  Points show up as zero.
+- **Ollama / Tantivy** bind mounts may not reconnect at all — the
+  container operates on its own writable layer, blind to the host data.
+  `tantivy_docs: 0`, `manifests/` is empty.
+
+**Fix.** Recreate the containers — fresh containers re-establish fresh
+bind-mount connections, and they pick up the populated host dirs.
+
+```bash
+# Run from inside WSL Ubuntu-24.04, NOT Git Bash
+cd /mnt/d/Vishvas-rag-pipeline
+docker compose down                    # NOT `down -v` — see warning below
+docker compose up -d
+sleep 60                                # let reranker reload its model
+curl http://localhost:8080/api/health   # tantivy_docs should match Qdrant points_count
+```
+
+If `docker compose down` errors with *"service 'open-webui' has neither
+an image nor a build context"*, your `docker-compose.override.yml` still
+references services that no longer exist in the base compose. Edit the
+override to drop the dead service sections (and remember `!override`,
+not `!reset`, when replacing the volumes list).
+
+**Verify the data really is intact before assuming the worst.** From WSL
+Ubuntu, an Alpine helper container can read the bind-mount source
+without needing `sudo`:
+
+```bash
+docker run --rm -v /home/$USER/transcript-rag-data:/data alpine sh -c \
+  'du -sh /data/postgres /data/qdrant /data/ollama; \
+   cat /data/postgres/PG_VERSION; \
+   ls /data/qdrant/collections; \
+   find /data/ollama/models/manifests -type f | head'
+```
+
+Expect: ~10 GB of Ollama, several hundred MB of Qdrant, the `transcripts`
+collection, and a populated `PG_VERSION`. If any of those are missing
+from the host as well, the data really is gone — recovery means
+re-ingestion.
+
+> ⚠️ **Never run `docker compose down -v`** in this stack. The `-v` flag
+> removes named volumes. Bind mounts (everything migrated to
+> `~/transcript-rag-data/`) are NOT affected by `-v`, but if any named
+> volume ever creeps back into the compose file `-v` will wipe it
+> silently. Plain `down` is enough — it removes containers and the
+> network, never the data.
+
+---
+
+## Dashboard / frontend changes don't appear after edits
+
+**Symptom.** You edited a file under `rag_api/` or `frontend/src/` and
+ran `docker compose up -d`, but the running stack is still on the old
+behaviour:
+
+- New API endpoint returns `404 Not Found`
+- New React component (e.g. a `Sidebar`) doesn't render
+- `POST /api/history` succeeds in `app.py` source but the container says
+  *"Not Found"*
+- `/openapi.json` doesn't list the new route
+- Browser's loaded `<script src="/assets/index-XXXX.js">` hash hasn't
+  changed
+
+**Cause.** `docker compose up -d` reuses the cached image. The `rag-api`
+image is multi-stage and bakes BOTH the Python module AND the built
+React `dist/` bundle at build time (`services/rag_api/Dockerfile`).
+Without the `--build` flag, neither updates — the container starts
+yesterday's snapshot of your code.
+
+This is most painful when you've added something brand-new (a route, a
+component, a SQL migration) and the on-disk file is there but the
+container has never seen it.
+
+**Fix.** Rebuild only `rag-api` — Ollama, Qdrant, Postgres, and the
+reranker stay running and untouched:
+
+```bash
+cd /mnt/d/Vishvas-rag-pipeline
+docker compose up -d --build rag-api
+```
+
+First build is slow (~5–10 min: Node `npm ci` + `vite build`, then
+Python `pip install`). Subsequent rebuilds with only a Python change are
+fast because Docker caches the Node stage.
+
+**For frontend-only iteration**, skip the rebuild loop entirely — run
+the Vite dev server on `:5173`, which hot-reloads on edit and proxies
+`/api` to the container on `:8080`. See [frontend/README.md](../frontend/README.md):
+
+```bash
+cd frontend
+npm install                          # one-time
+npm run dev                          # http://localhost:5173
+```
+
+You only need `--build` to ship the change into the dashboard container.
+
+**How to confirm the rebuild took.** Three quick checks:
+
+```bash
+# 1. Image build time should match "now"
+docker image inspect vishvas-rag-pipeline-rag-api --format '{{.Created}}'
+
+# 2. New file present in the container
+docker exec rag-api ls /app/rag_api/    # should include your new module
+
+# 3. New route in the OpenAPI spec
+curl -s http://localhost:8080/openapi.json | grep -oE '"/api/[^"]*"' | sort -u
+```
+
+If a frontend route still serves stale HTML, hard-refresh the browser
+(`Ctrl+Shift+R`) to bypass cached asset hashes — the new bundle has a
+new hash but `index.html` may be locally cached.
+
+**Note on migrations.** SQL migrations under
+`infra/postgres/migrations/` are NOT applied by `docker compose up`.
+Run them manually against the live DB:
+
+```bash
+docker exec -i postgres psql -U owui -d openwebui \
+  < infra/postgres/migrations/002_conversations.sql
+```
+
+The same applies to one-shot Python init scripts under `scripts/`.
+
+---
+
 ## Bonus: ingestion exits 130 unexpectedly
 
 **Symptom.** `bulk_ingest_hardened.py` returns exit code 130 without

@@ -4,6 +4,10 @@ import type { ReactNode } from "react";
 import type { QueryMeta } from "../types";
 import { ResultCard } from "./ResultCard";
 
+/** Citations stay collapsed until the user opens them, keeping the focus on
+ *  the answer. They auto-reveal nothing — the answer text is the headline. */
+const SHOW_CITATIONS_COLLAPSED_BY_DEFAULT = true;
+
 interface Props {
   answer: string;
   meta: QueryMeta | null;
@@ -20,13 +24,19 @@ const CITATION_RE = /\[(\d+)\]/g;
  */
 export function AnswerPane({ answer, meta, running, error }: Props) {
   const [flashed, setFlashed] = useState<number | null>(null);
+  const [showSources, setShowSources] = useState(!SHOW_CITATIONS_COLLAPSED_BY_DEFAULT);
 
   const onCite = useCallback((n: number) => {
-    const el = document.getElementById(`cite-${n}`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      setFlashed(n);
-    }
+    // Opening the panel is harmless if it was already open.
+    setShowSources(true);
+    // Defer the scroll so the citation cards have a frame to mount in.
+    window.requestAnimationFrame(() => {
+      const el = document.getElementById(`cite-${n}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        setFlashed(n);
+      }
+    });
   }, []);
 
   // Clear the highlight pulse so the same citation can flash again later.
@@ -36,37 +46,70 @@ export function AnswerPane({ answer, meta, running, error }: Props) {
     return () => window.clearTimeout(t);
   }, [flashed]);
 
+  // A new question resets the panel to its default collapsed state.
+  useEffect(() => {
+    if (running) setShowSources(!SHOW_CITATIONS_COLLAPSED_BY_DEFAULT);
+  }, [running]);
+
   const segments = renderAnswer(answer, meta?.count ?? 0, onCite);
+  const sourcesReady = !running && !!meta && meta.citations.length > 0;
 
   return (
-    <section className="answer">
-      {meta && (
-        <div className="answer-meta">
-          <span>Language: {meta.answer_language}</span>
-          <span>Scope: {meta.scope}</span>
-          <span>{meta.count} citations</span>
-        </div>
-      )}
+    <>
       <div className="answer-body">
         {segments}
         {running && <span className="cursor" />}
       </div>
       {error && <div className="answer-error">{error}</div>}
-      {meta && meta.citations.length > 0 && (
-        <div className="citations">
-          <h3>Citations</h3>
-          {meta.citations.map((c, i) => (
-            <ResultCard
-              key={c.chunk_id}
-              result={c}
-              index={i + 1}
-              highlight={flashed === i + 1}
-            />
-          ))}
+      {sourcesReady && (
+        <div className="sources">
+          <button
+            className="sources-toggle"
+            onClick={() => setShowSources((v) => !v)}
+            aria-expanded={showSources}
+          >
+            <span
+              className="advanced-chevron"
+              style={{
+                display: "inline-block",
+                transform: showSources ? "rotate(90deg)" : undefined,
+                transition: "transform 150ms ease",
+                marginRight: 6,
+              }}
+            >
+              ▸
+            </span>
+            {showSources ? "Hide sources" : "Show sources"}{" "}
+            <span className="sources-count">{meta!.count}</span>
+            <span className="sources-meta">
+              · {prettyScope(meta!.scope)} · {meta!.answer_language}
+            </span>
+          </button>
+          {showSources && (
+            <div className="citations">
+              {meta!.citations.map((c, i) => (
+                <ResultCard
+                  key={c.chunk_id}
+                  result={c}
+                  index={i + 1}
+                  highlight={flashed === i + 1}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
-    </section>
+    </>
   );
+}
+
+function prettyScope(scope: string): string {
+  switch (scope) {
+    case "chunks": return "passages";
+    case "summaries": return "transcripts";
+    case "two_stage": return "transcripts → passages";
+    default: return scope;
+  }
 }
 
 /** Split the answer text on `[N]` markers and return inline-renderable nodes. */

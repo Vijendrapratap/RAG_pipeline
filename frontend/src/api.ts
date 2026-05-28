@@ -8,9 +8,13 @@
  * (EventSource cannot set request headers).
  */
 import type {
+  ConversationListResponse,
+  ConversationRecord,
   FilterOptionsResponse,
   Health,
+  HistorySaveBody,
   MentionsResponse,
+  ModelsResponse,
   QueryBody,
   QueryMeta,
   SearchBody,
@@ -80,10 +84,23 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function deleteJson<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorDetail(res));
+  return res.json() as Promise<T>;
+}
+
 // ---- endpoints -----------------------------------------------------------
 
 export function getHealth(): Promise<Health> {
   return getJson<Health>("/api/health", false);
+}
+
+export function listModels(): Promise<ModelsResponse> {
+  return getJson<ModelsResponse>("/api/models", false);
 }
 
 export function getFilters(): Promise<FilterOptionsResponse> {
@@ -117,6 +134,27 @@ export function analyticsTranscripts(
 ): Promise<TranscriptsResponse> {
   const qs = new URLSearchParams({ term, limit: String(limit) });
   return getJson<TranscriptsResponse>(`/api/analytics/transcripts?${qs}`, true);
+}
+
+// ---- /api/history --------------------------------------------------------
+
+export function listHistory(limit = 200): Promise<ConversationListResponse> {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  return getJson<ConversationListResponse>(`/api/history?${qs}`, true);
+}
+
+export function getHistoryItem(id: string): Promise<ConversationRecord> {
+  return getJson<ConversationRecord>(`/api/history/${encodeURIComponent(id)}`, true);
+}
+
+export function saveHistory(body: HistorySaveBody): Promise<ConversationRecord> {
+  return postJson<ConversationRecord>("/api/history", body);
+}
+
+export function deleteHistoryItem(id: string): Promise<{ ok: boolean; id: string }> {
+  return deleteJson<{ ok: boolean; id: string }>(
+    `/api/history/${encodeURIComponent(id)}`,
+  );
 }
 
 // ---- /api/query streaming ------------------------------------------------

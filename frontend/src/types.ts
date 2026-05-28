@@ -12,8 +12,22 @@ export interface Health {
   bm25_enabled: boolean;
   tantivy_docs: number;
   auth_required: boolean;
+  chat_provider: ChatProvider;
   chat_model: string;
   embed_model: string;
+}
+
+// ---- /api/models ---------------------------------------------------------
+
+export interface ChatModel {
+  provider: ChatProvider;
+  model: string;
+  label: string;
+  is_default: boolean;
+}
+
+export interface ModelsResponse {
+  models: ChatModel[];
 }
 
 // ---- request shapes ------------------------------------------------------
@@ -47,9 +61,20 @@ export interface SearchBody {
   expand_query: boolean;
 }
 
+export type ChatProvider = "ollama" | "openrouter";
+
+/** Per-request model override. Both fields must be set together. */
+export interface ModelChoice {
+  provider: ChatProvider;
+  model: string;
+}
+
 export interface QueryBody extends SearchBody {
   answer_language: AnswerLanguage;
   stream: boolean;
+  /** Optional override; backend validates against the env allowlist. */
+  provider?: ChatProvider;
+  model?: string;
 }
 
 // ---- /api/filters --------------------------------------------------------
@@ -149,4 +174,50 @@ export interface TranscriptCount {
 export interface TranscriptsResponse {
   term: string;
   transcripts: TranscriptCount[];
+}
+
+// ---- /api/history --------------------------------------------------------
+
+/** Sidebar listing — light payload, no answer/citation bodies. */
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;   // ISO timestamp
+  mode: "answer" | "search";
+  scope: string;
+}
+
+export interface ConversationListResponse {
+  items: ConversationSummary[];
+  count: number;
+}
+
+/** Full record returned by GET /api/history/{id} and POST /api/history. */
+export interface ConversationRecord extends ConversationSummary {
+  question: string;
+  answer: string;
+  answer_language: string | null;
+  find_quote: boolean;
+  expanded: boolean;
+  top_k: number;
+  filters: Filters;
+  applied_filters: Record<string, unknown>;
+  detected_filters: Detection[];
+  citations: RetrievalResult[];
+}
+
+/** Body for POST /api/history. */
+export interface HistorySaveBody {
+  question: string;
+  answer: string;
+  mode: "answer" | "search";
+  scope: Scope;
+  top_k: number;
+  find_quote: boolean;
+  expanded: boolean;
+  answer_language: string | null;
+  filters: Filters;
+  applied_filters: Record<string, unknown>;
+  detected_filters: Detection[];
+  citations: RetrievalResult[];
 }

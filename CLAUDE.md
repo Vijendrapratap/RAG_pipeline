@@ -10,6 +10,7 @@ A strictly local, open-source RAG (retrieval-augmented generation) system over ~
 
 1. **Read PRD.md before each phase.** It is the single source of truth.
 2. **Open-source only.** No OpenAI, Anthropic, Cohere, Pinecone, Voyage, Weaviate Cloud, etc. Every dependency must be on the green-lit list in PRD §14, or have its license verified before use.
+   *Acknowledged exception (gated):* `CHAT_PROVIDER=openrouter` is permitted as an opt-in alternate chat backend for A/B-testing larger open-weights models (e.g. `qwen/qwen3.6-27b`) that don't fit the local GPU. Default deployment stays strictly local (`CHAT_PROVIDER=ollama`). Retrieved chunks leave the machine when OpenRouter is enabled — only flip it when that trade-off is acceptable.
 3. **One phase at a time.** Implement only what the current phase asks for. No skipping ahead, no bundling phases.
 4. **Acceptance criteria are mandatory.** After implementing a phase, run its acceptance steps and show me the output. Don't move on until they pass.
 5. **Commit per phase.** Use the exact commit message in the PRD. One phase = one commit (or one squash-merged branch).

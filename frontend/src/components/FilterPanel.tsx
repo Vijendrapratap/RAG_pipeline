@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+
 import { FACETS, countActive } from "../filters";
 import type { Filters, FilterOptions } from "../types";
 
@@ -6,15 +8,24 @@ interface Props {
   options: Partial<FilterOptions> | null;
   dbOk: boolean;
   onChange: (next: Filters) => void;
+  onClose: () => void;
 }
 
 /**
- * Sidebar with one dropdown per file_meta facet, plus a date-range picker
- * and a free-text speaker field. List-typed fields (track_type, topics, …)
- * still send a one-element array — that is what the backend expects.
+ * Slide-in filter drawer. One dropdown per file_meta facet, plus a date-range
+ * picker and a free-text speaker field. List-typed fields still send a one-
+ * element array — that is what the backend expects.
  */
-export function FilterPanel({ filters, options, dbOk, onChange }: Props) {
+export function FilterPanel({ filters, options, dbOk, onChange, onClose }: Props) {
   const active = countActive(filters);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   function setScalar(field: keyof Filters, value: string) {
     onChange({ ...filters, [field]: value || null });
@@ -33,77 +44,93 @@ export function FilterPanel({ filters, options, dbOk, onChange }: Props) {
   }
 
   return (
-    <aside className="filters">
-      <div className="filters-head">
-        <span>Filters</span>
-        {active > 0 && (
-          <button className="link-btn" onClick={() => onChange({})}>
-            Clear ({active})
+    <>
+      <div className="filter-drawer-backdrop" onClick={onClose} />
+      <aside className="filter-drawer" role="dialog" aria-label="Filters">
+        <header className="filter-drawer-head">
+          <h3>Filters</h3>
+          <button className="btn btn--ghost" onClick={onClose} aria-label="Close filters">
+            ✕
           </button>
-        )}
-      </div>
+        </header>
 
-      {!dbOk && (
-        <div className="filters-warn">
-          Filter options unavailable — Postgres unreachable. You can still
-          type a query.
-        </div>
-      )}
+        <div className="filter-drawer-body">
+          {!dbOk && (
+            <div className="filters-warn">
+              Filter options unavailable — Postgres unreachable. You can still
+              type a query.
+            </div>
+          )}
 
-      <label className="field">
-        <span>Speaker</span>
-        <input
-          type="text"
-          value={filters.speaker ?? ""}
-          placeholder="e.g. Swami Ji"
-          onChange={(e) =>
-            onChange({ ...filters, speaker: e.target.value || null })
-          }
-        />
-      </label>
-
-      {FACETS.map((f) => {
-        const opts = (options?.[f.optionKey] ?? []) as string[];
-        if (opts.length === 0) return null;
-        const raw = filters[f.field];
-        const current = Array.isArray(raw) ? raw[0] ?? "" : (raw ?? "") as string;
-        return (
-          <label className="field" key={f.field}>
-            <span>{f.label}</span>
-            <select
-              value={current}
+          <label className="field">
+            <span>Speaker</span>
+            <input
+              type="text"
+              value={filters.speaker ?? ""}
+              placeholder="e.g. Swami Ji"
               onChange={(e) =>
-                f.isList
-                  ? setList(f.field, e.target.value)
-                  : setScalar(f.field, e.target.value)
+                onChange({ ...filters, speaker: e.target.value || null })
               }
-            >
-              <option value="">(any)</option>
-              {opts.map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </select>
+            />
           </label>
-        );
-      })}
 
-      <div className="field field--range">
-        <span>Date range</span>
-        <div className="range-inputs">
-          <input
-            type="date"
-            value={filters.date_range?.[0] ?? ""}
-            onChange={(e) => setDate(0, e.target.value)}
-          />
-          <input
-            type="date"
-            value={filters.date_range?.[1] ?? ""}
-            onChange={(e) => setDate(1, e.target.value)}
-          />
+          {FACETS.map((f) => {
+            const opts = (options?.[f.optionKey] ?? []) as string[];
+            if (opts.length === 0) return null;
+            const raw = filters[f.field];
+            const current = Array.isArray(raw) ? raw[0] ?? "" : (raw ?? "") as string;
+            return (
+              <label className="field" key={f.field}>
+                <span>{f.label}</span>
+                <select
+                  value={current}
+                  onChange={(e) =>
+                    f.isList
+                      ? setList(f.field, e.target.value)
+                      : setScalar(f.field, e.target.value)
+                  }
+                >
+                  <option value="">(any)</option>
+                  {opts.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            );
+          })}
+
+          <div className="field field--range">
+            <span>Date range</span>
+            <div className="range-inputs">
+              <input
+                type="date"
+                value={filters.date_range?.[0] ?? ""}
+                onChange={(e) => setDate(0, e.target.value)}
+              />
+              <input
+                type="date"
+                value={filters.date_range?.[1] ?? ""}
+                onChange={(e) => setDate(1, e.target.value)}
+              />
+            </div>
+          </div>
         </div>
-      </div>
-    </aside>
+
+        <footer className="filter-drawer-foot">
+          <button
+            className="btn"
+            onClick={() => onChange({})}
+            disabled={active === 0}
+          >
+            Clear {active > 0 ? `(${active})` : ""}
+          </button>
+          <button className="btn btn--primary" onClick={onClose}>
+            Done
+          </button>
+        </footer>
+      </aside>
+    </>
   );
 }
