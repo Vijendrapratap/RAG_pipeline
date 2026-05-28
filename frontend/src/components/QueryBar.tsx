@@ -143,7 +143,7 @@ export function QueryBar(props: Props) {
           Advanced
         </button>
 
-        <span className="composer-hint">Enter to send · Shift+Enter for newline</span>
+        <span className="composer-hint">Press Enter to send · Shift + Enter for a new line</span>
 
         <div className="composer-spacer" />
 

@@ -37,20 +37,24 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
     <div className="login">
       <form className="login-card" onSubmit={submit}>
         <div className="login-brand">
-          <span className="brand-mark" aria-hidden="true">V</span>
-          <h1>Vishvas RAG</h1>
+          <span className="brand-mark brand-mark--lg" aria-hidden="true" lang="hi">वि</span>
+          <h1>Vishvas Foundation</h1>
+          <span className="login-sub">Discourse Archive</span>
         </div>
-        <p>Enter the dashboard password to continue.</p>
-        <input
-          type="password"
-          value={value}
-          autoFocus
-          placeholder="Password"
-          onChange={(e) => setValue(e.target.value)}
-        />
+        <p>Enter the archive password to continue.</p>
+        <label className="login-field">
+          <span>Password</span>
+          <input
+            type="password"
+            value={value}
+            autoFocus
+            placeholder="••••••••"
+            onChange={(e) => setValue(e.target.value)}
+          />
+        </label>
         {error && <div className="login-error">{error}</div>}
         <button type="submit" disabled={busy || !value}>
-          {busy ? "Checking…" : "Sign in"}
+          {busy ? "Checking…" : "Enter archive"}
         </button>
       </form>
     </div>

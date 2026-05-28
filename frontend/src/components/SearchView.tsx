@@ -36,11 +36,16 @@ interface Props {
   onConversationSaved: () => void;
 }
 
-const EXAMPLES = [
-  "कर्म योग क्या है",
-  "What did Swami ji say about meditation?",
-  "In which event was the SAMBODHAN track recorded?",
-  "Top discourses on dharma from 2015",
+interface Example {
+  text: string;
+  hint: string;
+}
+
+const EXAMPLES: Example[] = [
+  { text: "कर्म योग क्या है",                              hint: "Concept · Hindi" },
+  { text: "What did Swami ji say about meditation?",        hint: "Theme · English" },
+  { text: "In which event was the SAMBODHAN track recorded?", hint: "Find by source" },
+  { text: "Top discourses on dharma from 2015",             hint: "Filtered search" },
 ];
 
 /**
@@ -350,7 +355,7 @@ export function SearchView({
               )}
 
               <div className="bubble-assistant">
-                <div className="bubble-avatar" aria-hidden="true">V</div>
+                <div className="bubble-avatar" aria-hidden="true" lang="hi">वि</div>
                 <div className="bubble-content">
                   <DetectedFilters
                     detections={detections}
@@ -415,17 +420,25 @@ export function SearchView({
 function Welcome({ onExample }: { onExample: (text: string) => void }) {
   return (
     <div className="welcome">
-      <div className="welcome-mark" aria-hidden="true">V</div>
-      <h2>How can I help today?</h2>
+      <div className="welcome-mark" aria-hidden="true" lang="hi">वि</div>
+      <span className="welcome-eyebrow">Vishvas Foundation · Discourse Archive</span>
+      <h2>Ask the archive</h2>
       <p>
-        Ask anything about the transcript archive — in Hindi or English. I'll
-        search the corpus and answer with citations you can click through to
-        the source passage.
+        Search through every recorded discourse in Hindi or English. Every
+        answer is grounded in passages from the source recording, with
+        citations you can open to read or listen.
       </p>
+      <div className="welcome-examples-head">Try asking</div>
       <div className="welcome-examples">
         {EXAMPLES.map((ex) => (
-          <button key={ex} className="welcome-example" onClick={() => onExample(ex)}>
-            {ex}
+          <button
+            key={ex.text}
+            className="welcome-example"
+            onClick={() => onExample(ex.text)}
+            title={ex.hint}
+          >
+            <span className="welcome-example-text">{ex.text}</span>
+            <span className="welcome-example-hint">{ex.hint}</span>
           </button>
         ))}
       </div>

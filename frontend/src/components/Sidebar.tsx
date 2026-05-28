@@ -23,11 +23,31 @@ interface Props {
   onAuthFail: () => void;
 }
 
-function ServiceDot({ name, up }: { name: string; up: boolean }) {
+/**
+ * One-line health summary. Green dot + "All systems online" when everything's
+ * up; amber + count when something is degraded. Detailed per-service dots are
+ * shown on hover via the tooltip — keeps the footer clean for non-tech users.
+ */
+function HealthSummary({ health }: { health: Health }) {
+  const svc = health.services;
+  const states = [
+    { name: "Answer model", up: svc.ollama },
+    { name: "Search index", up: svc.qdrant },
+    { name: "Reranker", up: svc.reranker },
+  ];
+  const down = states.filter((s) => !s.up);
+  const bm25Off = !health.bm25_enabled;
+  const allOk = down.length === 0 && !bm25Off;
+  const tooltip = states.map((s) => `${s.name}: ${s.up ? "online" : "offline"}`).join("\n")
+    + (bm25Off ? "\nKeyword index: not loaded" : "");
   return (
-    <span className="svc" title={`${name}: ${up ? "online" : "offline"}`}>
-      <span className={`svc-dot ${up ? "svc-dot--up" : "svc-dot--down"}`} />
-      {name}
+    <span className="health" title={tooltip}>
+      <span className={`health-dot ${allOk ? "health-dot--ok" : "health-dot--warn"}`} />
+      {allOk
+        ? "All systems online"
+        : down.length > 0
+          ? `${down.length} service${down.length > 1 ? "s" : ""} offline`
+          : "Keyword search unavailable"}
     </span>
   );
 }
@@ -97,7 +117,6 @@ export function Sidebar({
   activeConversationId, onSelectConversation, onNewChat,
   historyVersion, onAuthFail,
 }: Props) {
-  const svc = health?.services;
   const [items, setItems] = useState<ConversationSummary[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
@@ -141,8 +160,11 @@ export function Sidebar({
     <aside className={"sidebar" + (collapsed ? " sidebar--collapsed" : "")}>
       <div className="sidebar-head">
         <span className="brand">
-          <span className="brand-mark" aria-hidden="true">V</span>
-          <span className="brand-text">Vishvas RAG</span>
+          <span className="brand-mark" aria-hidden="true" lang="hi">वि</span>
+          <span className="brand-text">
+            <span className="brand-name">Vishvas Foundation</span>
+            <span className="brand-sub">Discourse Archive</span>
+          </span>
         </span>
         <button
           className="sidebar-toggle"
@@ -224,19 +246,7 @@ export function Sidebar({
       </div>
 
       <div className="sidebar-foot">
-        {svc && (
-          <div className="svc-row">
-            <ServiceDot name="ollama" up={svc.ollama} />
-            <ServiceDot name="qdrant" up={svc.qdrant} />
-            <ServiceDot name="reranker" up={svc.reranker} />
-            {!health?.bm25_enabled && (
-              <span className="svc svc--warn" title="BM25 index not loaded">
-                bm25 off
-              </span>
-            )}
-          </div>
-        )}
-        {health && <span className="sidebar-model">{health.chat_model}</span>}
+        {health && <HealthSummary health={health} />}
         {canLogout && (
           <button className="sidebar-signout" onClick={onLogout}>
             Sign out
