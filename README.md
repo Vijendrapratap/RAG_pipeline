@@ -1,328 +1,192 @@
 # transcript-rag
 
-Local-only, open-source RAG system over ~5 TB of Whisper-generated
-transcripts. Hybrid retrieval (Qdrant dense + Tantivy BM25 +
-<<<<<<< HEAD
-bge-reranker-v2-m3) behind Open WebUI function tools, with
-Postgres-backed analytics. **Single host, single GPU, no paid APIs.**
+A private, on-premise system that lets you **ask questions in plain language
+across a large library of voice transcripts** and get cited answers back.
+It runs entirely on your own machine — no data leaves the host, no paid
+APIs, no cloud accounts required.
 
-Full spec: [PRD.md](PRD.md) (1258 lines, the source of truth). AI
-assistant context: [CLAUDE.md](CLAUDE.md). Status: 12/12 phases
-complete; full per-phase log in `doc.md` (gitignored).
-=======
-bge-reranker-v2-m3) with **bilingual (Hindi/English) answer synthesis**, a
-custom **FastAPI + React dashboard**, and Postgres-backed analytics.
-**Single host, single GPU, no paid APIs.**
+> If you are the operator setting this up for the first time, follow
+> [Quick start](#quick-start) below. If you are a developer joining the
+> project, jump to [How the code is organised](#how-the-code-is-organised).
 
-Spec: [PRD.md](PRD.md) (the original 13-phase build — ingestion / retrieval
-internals). Dashboard track: [DASHBOARD.md](DASHBOARD.md) (Phases A–F that
-replaced Open WebUI). Per-phase change log: [CHANGES.md](CHANGES.md).
-Upgrading an existing deployment: [UPGRADE.md](UPGRADE.md). AI assistant
-context: [CLAUDE.md](CLAUDE.md).
->>>>>>> 96db01aafe8acc35e65a533b0b61a7a3f00e6546
+## What it does, in plain English
 
-## What it does
+You point the system at a folder of transcripts (whichever Whisper produced —
+either JSON or plain `.txt`). It reads them, builds a searchable index, and
+opens a small website on your computer where anyone with the dashboard
+password can:
 
-You point it at a directory of Whisper-generated transcripts (either
-<<<<<<< HEAD
-whisperX JSON or plain `.txt`), it embeds and indexes them, and then a
-chat model in Open WebUI can answer questions over the corpus by calling
-five function tools:
+- **Ask a question** in Hindi or English and get a written answer with
+  numbered citations `[1] [2] [3]` linking back to the exact passages.
+- **Search transcripts** by speaker, source file, date, or any combination.
+- **See analytics**: how often a term is mentioned, who talks about it most,
+  which transcripts cover it.
+- **Browse past conversations** in a sidebar (history is saved automatically).
 
-- **`search_transcripts(query, speaker?, source_file?, top_k?)`** —
-  semantic search with optional filters.
-- **`find_quote(partial_quote, top_k?)`** — BM25-heavy variant for
-  finding exact phrasings.
-- **`count_mentions(term, speaker?)`** — how often a term appears.
-- **`top_speakers_for_topic(term, limit?)`** — who talks about it most.
-- **`list_transcripts_mentioning(term, limit?)`** — which files cover it.
+The dashboard is at `http://localhost:8080` once the system is running.
 
-Results are returned with timestamp + speaker + source-file citations.
+## What's inside
 
-## Architecture in one paragraph
-
-Open WebUI (chat) → calls tools → tools query Qdrant (1024-d int8 dense
-vectors, bge-m3 embeddings) and Tantivy (BM25 sidecar on the host) →
-fuse with weighted RRF → rerank top-40 with bge-reranker-v2-m3 hosted by
-Infinity → return top-8 to the LLM. Analytics tools hit Postgres
-(`chunk_meta` with GIN indexes). Everything runs in one docker-compose
-stack on one RTX 5070 (12 GB VRAM). Diagram and per-component detail in
-[docs/architecture.md](docs/architecture.md).
-=======
-whisperX JSON or plain `.txt`), it embeds and indexes them, then the
-dashboard lets you ask questions and get bilingual, citation-grounded
-answers over the corpus.
-
-The dashboard speaks to a small FastAPI surface:
-
-- **`POST /api/query`** — full RAG turn: hybrid retrieve + answer (SSE
-  stream), with optional HyDE expansion and a deterministic filter
-  extractor on the query text.
-- **`POST /api/search`** — retrieval only, no LLM. Three scopes:
-  `chunks`, `summaries` (one hit per file), `two_stage` (summary search
-  picks files, then chunks within them).
-- **`GET /api/analytics/*`** — mention counts, top speakers, transcripts
-  ranking. Hindi-correct full-text search.
-- **`GET /api/filters`** — distinct metadata for the dashboard
-  dropdowns.
-
-Citation-grounded answers reference passages as `[N]`, mapped to a
-clickable citation list. See [DASHBOARD.md](DASHBOARD.md#api-endpoints)
-for the full contract.
-
-## Architecture in one paragraph
-
-Browser → React dashboard → **rag-api** (FastAPI; Tantivy BM25
-**in-process**) → Qdrant (1024-d int8 dense vectors, bge-m3) + Postgres
-(`chunk_meta`/`file_meta` with GIN indexes) → fused with weighted RRF →
-reranked by bge-reranker-v2-m3 (Infinity) → answer synthesised by Ollama
-(qwen2.5:7b today; the fine-tuned 26B model later, one-line .env swap).
-Five containers in one docker-compose stack on one RTX 5070 (12 GB VRAM).
-Diagram + per-component detail: [docs/architecture.md](docs/architecture.md).
->>>>>>> 96db01aafe8acc35e65a533b0b61a7a3f00e6546
-
-## Hardware
-
-| Requirement | Minimum | Recommended |
+| Piece | Job | Where it runs |
 |---|---|---|
-| OS | Ubuntu 22.04+ (or WSL2 on Windows) | Ubuntu 22.04+ |
-| GPU | NVIDIA RTX 5070 (12 GB VRAM) | same |
+| Dashboard (React) | The website users actually click | inside the `rag-api` container at `/` |
+| `rag-api` (FastAPI) | Receives questions, finds passages, writes the answer | container, port 8080 |
+| Qdrant | Stores the "meaning" of every passage as vectors for semantic search | container, port 6333 |
+| Tantivy | Keyword (BM25) search index; runs inside `rag-api` | in-process |
+| bge-reranker (Infinity) | Re-ranks the top results so the best one is first | container, port 7997 |
+| Ollama | Runs the language model that writes the final answer | container, port 11434 |
+| Postgres | Stores chat history, transcript metadata, analytics counters | container, port 5432 |
+
+Five Docker containers on one machine. One NVIDIA GPU (RTX 5070, 12 GB
+VRAM) handles the embeddings, reranker, and answer model.
+
+## Hardware you need
+
+| | Minimum | Recommended |
+|---|---|---|
+| OS | Ubuntu 22.04+ (or WSL2 on Windows 11) | Ubuntu 22.04+ |
+| GPU | NVIDIA RTX 5070, 12 GB VRAM | same or better |
 | RAM | 64 GB | 128 GB |
-| Disk (indices) | ~3 TB | + your source transcripts |
-| Docker | Compose v2 | + NVIDIA Container Toolkit |
+| Disk | ~3 TB free for indices, plus room for your transcripts | + 50% headroom |
+| Software | Docker + NVIDIA Container Toolkit | + Docker Compose v2 |
 
-## Prerequisites
+## Quick start
 
-<<<<<<< HEAD
-- **Docker Engine + Compose v2.** On Windows, use Docker Desktop with
-  WSL2 integration enabled for your Ubuntu distro (Settings → Resources
-  → WSL Integration).
-- **NVIDIA Container Toolkit (`nvidia-ctk`).** Required for the
-  `ollama` and `reranker` services. Verify with
-  `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`
-  before bringing up the stack.
-  [Install instructions](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-- **NVIDIA driver visible to WSL2.** Run `nvidia-smi` inside your WSL
-  distro before Phase 1; if it errors, update the host NVIDIA driver
-  on Windows so `/dev/dxg` is exposed.
-
-## Quickstart — first query in under 2 hours (assuming pre-pulled models)
-=======
-- **Docker Engine + Compose v2.** On Windows, Docker Desktop with WSL2
-  integration enabled.
-- **NVIDIA Container Toolkit (`nvidia-ctk`).** Required for the `ollama`
-  and `reranker` services. Verify:
-  ```bash
-  docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
-  ```
-  before bringing up the stack. [Install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-- **NVIDIA driver visible to WSL2.** `nvidia-smi` must work inside WSL.
-
-## Quickstart
->>>>>>> 96db01aafe8acc35e65a533b0b61a7a3f00e6546
+This walks you from a fresh checkout to a running dashboard. Plan on
+about two hours the first time (most of which is models downloading).
 
 ```bash
-# 1. Clone + configure
-git clone <repo> transcript-rag && cd transcript-rag
+# 1. Get the code and create your settings file
+git clone <repo-url> transcript-rag
+cd transcript-rag
 cp .env.example .env
-<<<<<<< HEAD
-# Edit .env, generate secrets with:
-#   WEBUI_SECRET_KEY=$(openssl rand -hex 32)
-#   POSTGRES_PASSWORD=$(openssl rand -hex 32)
-#   QDRANT_API_KEY=$(openssl rand -hex 32)
+```
 
-# 2. Infrastructure up
-docker compose up -d
-sleep 60
-bash scripts/00_health_check.sh         # all six services should be ✅
+Open `.env` in a text editor and fill in the three passwords at the top:
 
-# 3. Models + storage
-bash scripts/01_pull_models.sh          # bge-m3, qwen2.5:7b, deepseek-r1:7b
-bash scripts/02_init_qdrant.sh          # creates `transcripts` collection
-bash scripts/03_init_postgres.sh        # applies infra/postgres/analytics_schema.sql
+```text
+POSTGRES_PASSWORD=...    # run: openssl rand -hex 32
+QDRANT_API_KEY=...       # run: openssl rand -hex 32
+DASHBOARD_PASSWORD=...   # any password you'll share with users (or leave empty for no login)
+```
 
-# 4. Tantivy sidecar (host process — production: use systemd, see runbook)
-bash scripts/run_tantivy_server.sh &
-
-# 5. Chunk your transcripts
-=======
-# Edit .env, generate secrets:
-#   POSTGRES_PASSWORD=$(openssl rand -hex 32)
-#   QDRANT_API_KEY=$(openssl rand -hex 32)
-#   DASHBOARD_PASSWORD=$(openssl rand -hex 16)   # empty = no auth (dev only)
-
-# 2. Bring the stack up — builds the rag-api image on first run
+```bash
+# 2. Start the system. First run builds the dashboard image (~5 minutes).
 docker compose up -d --build
-bash scripts/00_health_check.sh         # five services should be ✅
 
-# 3. Models + storage (idempotent)
-bash scripts/01_pull_models.sh          # bge-m3, qwen2.5:7b
-bash scripts/02_init_qdrant.sh          # creates `transcripts` collection
-bash scripts/03_init_postgres.sh        # applies infra/postgres/analytics_schema.sql
+# 3. Sanity-check that all five services answered.
+bash scripts/00_health_check.sh
 
-# 4. Chunk your transcripts
->>>>>>> 96db01aafe8acc35e65a533b0b61a7a3f00e6546
-python -m ingestion.chunker_text /data/raw-transcripts /data/processed
-# OR for whisperX JSON:
-# python -m ingestion.chunker_json /data/whisperx-out /data/processed
+# 4. Download the AI models (one-time, ~10 GB).
+bash scripts/01_pull_models.sh
 
-<<<<<<< HEAD
-# 6. Preflight on a 100 GB slice (mandatory before full corpus run)
+# 5. Set up the search indices (idempotent — safe to re-run).
+bash scripts/02_init_qdrant.sh
+bash scripts/03_init_postgres.sh
+
+# 6. Process your transcripts into searchable chunks.
+python -m ingestion.chunker_text /path/to/raw-transcripts /path/to/processed
+# OR for whisperX JSON output:
+# python -m ingestion.chunker_json /path/to/whisperx-out /path/to/processed
+
+# 7. Run the preflight check on a 100 GB slice before the full ingestion.
 bash scripts/preflight.sh
-# Acceptance: ≥95% files ok, eval Hit@5 ≥80%. If these fail, fix before
-# committing the multi-day full run.
+# Acceptance: ≥95% of files OK, eval Hit@5 ≥80%. Fix any failures here
+# before committing to the multi-day full run.
 
-# 7. Full ingestion (run in tmux — takes 8–14 days for ~5 TB)
+# 8. Full ingestion. For ~5 TB of transcripts this takes 8–14 days,
+#    so run it in a tmux session and detach.
 tmux new -s ingest
-python -m ingestion.bulk_ingest_hardened --chunks-dir /data/processed
-# Ctrl-B D to detach; reattach with `tmux a -t ingest`
+python -m ingestion.bulk_ingest_hardened --chunks-dir /path/to/processed
+# Ctrl-B then D to detach; reattach later with: tmux a -t ingest
 
-# 8. Verify
-python -m ingestion.verify_ingestion --chunks-dir /data/processed
+# 9. Verify ingestion finished cleanly.
+python -m ingestion.verify_ingestion --chunks-dir /path/to/processed
 
-# 9. One-time Open WebUI setup (in the browser at http://localhost:8080):
-#    - Sign in as admin
-#    - Install function tools: see docs/install_functions.md
-#    - Configure chat models: see docs/model_config.md
-```
-
-After step 9, ask the chat model a question like *"find when someone
-mentioned the platform team"*. You should see citation badges and chunks
-returned from your transcripts.
-
-## Documentation
-
-- [PRD.md](PRD.md) — full product requirements + every locked design
-  decision. Read this first when anything is unclear.
-- [docs/architecture.md](docs/architecture.md) — diagram, per-component
-  role + failure modes, VRAM budget, network surface.
-- [docs/runbook.md](docs/runbook.md) — daily ops, log review,
-  dead-letter triage, disk monitoring, ingestion resume, backup
-  (Qdrant snapshots / Tantivy rsync / Postgres `pg_dump`), model
-  updates, adding new tools.
-- [docs/troubleshooting.md](docs/troubleshooting.md) — common failure
-  modes: Ollama OOM, Qdrant 503, Tantivy lock, reranker timeouts, tools
-  not visible.
-- [docs/install_functions.md](docs/install_functions.md) — one-time UI
-  steps to install `search_transcripts` and `analytics`.
-- [docs/model_config.md](docs/model_config.md) — per-model context
-  length, system prompt, function-calling settings.
-
-## Build phases
-
-Each phase has a single squash commit on `main`. To re-walk the build
-history:
-
-| # | Phase | What it built |
-|---|---|---|
-| 0 | Scaffolding | repo layout, `.env.example`, `pyproject.toml` |
-| 1 | Docker Compose infra | the 6-service `docker-compose.yml` + health check |
-| 2 | Model pulls + Qdrant init | bge-m3 + chat models, `transcripts` collection |
-| 3 | Chunkers | `chunker_json.py` (whisperX) + `chunker_text.py` |
-| 4 | Hardened bulk ingestion | `bulk_ingest_hardened.py` + retries, SIGALRM, dead-letter |
-| 5 | Tantivy BM25 sidecar | `services/tantivy_server/` + systemd unit |
-| 6 | Postgres analytics schema | `chunk_meta` / `file_meta` + GIN indexes |
-| 7 | Open WebUI function tools | `search_transcripts.py` + `analytics.py` |
-| 8 | Model config runbook | per-model settings + system prompt |
-| 9 | Eval harness | `eval/run_eval.py` + 30 golden queries |
-| 10 | Preflight on 100 GB slice | `scripts/preflight.sh` + reservoir sampler |
-| 11 | Documentation | this README + the docs/ directory |
-
-PRD §6 has the deliverables and acceptance criteria for every phase;
-`git log --oneline` shows the commits.
-=======
-# 5. Preflight on a 100 GB slice (mandatory before full corpus run)
-bash scripts/preflight.sh
-# Acceptance: ≥95% files ok, eval Hit@5 ≥80%.
-
-# 6. Full ingestion (run in tmux — 8–14 days for ~5 TB)
-tmux new -s ingest
-python -m ingestion.bulk_ingest_hardened --chunks-dir /data/processed
-# Ctrl-B D to detach; reattach: tmux a -t ingest
-
-# 7. Verify
-python -m ingestion.verify_ingestion --chunks-dir /data/processed
-
-# 8. (After Phase 13 enrichment) build the file-summary index for
-#    scope=summaries / scope=two_stage retrieval:
+# 10. (Optional, after content tagging) build the file-level summary index
+#     so the dashboard's "summaries" and "two-stage" scopes work.
 python -m ingestion.build_summary_index
-
-# 9. Open the dashboard
-xdg-open http://localhost:8080
 ```
 
-The dashboard is at `http://localhost:8080`. Sign in with
-`DASHBOARD_PASSWORD` (empty = no login screen).
+Open `http://localhost:8080` in a browser. Sign in with the
+`DASHBOARD_PASSWORD` you set above and ask your first question.
 
-## Upgrading an existing (pre-dashboard) deployment
+## Day-to-day use
 
-If you already ran the old Open WebUI–based stack, follow
-[UPGRADE.md](UPGRADE.md). The one change you must apply on existing data
-is the Hindi-correct Postgres FTS index rebuild
-([`infra/postgres/migrations/001_hindi_fts.sql`](infra/postgres/migrations/001_hindi_fts.sql)).
-Everything else is additive.
+Most users only see the dashboard. The tabs across the top:
 
-## Frontend (dashboard)
+- **Search** — the main view. Type a question, pick scope (chunks /
+  summaries / two-stage), and read the cited answer that streams back.
+- **Analytics** — counts and rankings (mentions of a term, who talks
+  about it most, which transcripts cover it).
+- **Sidebar** — your past conversations. Click one to reopen it.
 
-The React dashboard is a sibling project in [`frontend/`](frontend/).
-Phase F builds it inside the rag-api image and serves it from `/`, so a
-plain `docker compose up -d --build` ships both API and UI together.
-For dashboard-only development:
+For phrasing tips that get noticeably better answers, see
+[docs/how_to_ask.md](docs/how_to_ask.md).
 
-```bash
-cd frontend
-npm install
-npm run dev          # http://localhost:5173, proxies /api → :8080
+## How the code is organised
+
+```
+transcript-rag/
+├── rag_api/                 The FastAPI backend: receives queries, runs retrieval, writes answers
+├── frontend/                The React dashboard (Vite + TypeScript); built into the rag-api image
+├── ingestion/               Batch jobs that chunk transcripts and load them into Qdrant + Postgres
+├── infra/
+│   ├── postgres/            Schema + numbered migrations (001_hindi_fts.sql, 002_conversations.sql)
+│   └── qdrant/              Collection bootstrap script
+├── eval/                    Golden-query harness for measuring retrieval quality
+├── scripts/                 Operator shell scripts (00_health_check.sh, 01_pull_models.sh, …)
+├── services/
+│   └── rag_api/Dockerfile   Multi-stage build for the dashboard + API container
+├── tests/                   pytest suite (unit + integration)
+├── docs/                    Operator and developer documentation
+├── docker-compose.yml       The 5-container stack
+├── .env.example             Template for the configuration file (copy to .env)
+└── PRD.md                   The full product spec — the source of truth for design decisions
 ```
 
-See [frontend/README.md](frontend/README.md).
+The dashboard and API ship as **one container** (`rag-api`). FastAPI
+serves the React build at `/` and the API at `/api/*`. There is no
+separate frontend server in production.
 
-## Documentation
+## Documentation map
 
-- [DASHBOARD.md](DASHBOARD.md) — dashboard architecture, API contract,
-  per-phase status (A–F). **Start here for the current setup.**
-- [CHANGES.md](CHANGES.md) — per-phase change log (every file touched).
-- [UPGRADE.md](UPGRADE.md) — operator handoff for existing deployments.
-- [PRD.md](PRD.md) — original 13-phase build (ingestion + retrieval
-  internals). Still the source of truth for everything pre-dashboard.
-- [docs/architecture.md](docs/architecture.md), [docs/runbook.md](docs/runbook.md),
-  [docs/troubleshooting.md](docs/troubleshooting.md),
-  [docs/user_guide.md](docs/user_guide.md) — operator docs. These were
-  written for the Open WebUI era; each carries a Phase F banner noting
-  the parts that have changed.
->>>>>>> 96db01aafe8acc35e65a533b0b61a7a3f00e6546
+The docs are layered. Pick the one that matches what you need:
 
-## Tests
+| If you want to… | Read |
+|---|---|
+| Understand what was built and why | [PRD.md](PRD.md) (full spec, source of truth) |
+| See the dashboard's API contract | [docs/dashboard.md](docs/dashboard.md) |
+| Upgrade an older deployment | [docs/upgrade.md](docs/upgrade.md) |
+| See what changed and when | [docs/changes.md](docs/changes.md) |
+| Run the system day-to-day | [docs/runbook.md](docs/runbook.md) |
+| Diagnose a failure | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| See the architecture diagram | [docs/architecture.md](docs/architecture.md) |
+| Learn the dashboard as an end user | [docs/user_guide.md](docs/user_guide.md), [docs/how_to_ask.md](docs/how_to_ask.md) |
+| Configure Claude Code on this repo | [CLAUDE.md](CLAUDE.md) |
+
+## Running the tests
 
 ```bash
-# Unit tests (no live services required)
+# Fast unit tests — no services required
 pytest tests/unit -q
 
-# Integration tests (require docker-compose stack up + Phase 6 schema applied)
+# Integration tests — docker compose stack must be up + schema applied
 pytest tests/integration -q
 
-<<<<<<< HEAD
-# Single eval pass against the live stack
-python -m eval.run_eval --queries eval/golden_queries.yaml
-=======
-# Single eval pass (legacy harness — still uses open_webui_functions/)
+# Retrieval quality eval against the live stack
 python -m eval.run_eval --queries eval/golden_queries.yaml
 
-# Frontend type-check + build
+# Frontend type-check + production build
 cd frontend && npm run build
->>>>>>> 96db01aafe8acc35e65a533b0b61a7a3f00e6546
 ```
 
-## License notes
+## Licensing
 
-<<<<<<< HEAD
-All components are open-source (MIT / Apache-2.0 / BSD / similar).
-Per-component license verification documented in PRD §14. **No paid
-APIs anywhere** — this is a hard requirement and is enforced phase by
-phase.
-# Vishwas_RAG-pipeline
-=======
-All components open-source (MIT / Apache-2.0 / BSD / similar). Per-component
-license verification: PRD §14. **No paid APIs anywhere** — a hard
-requirement, enforced phase by phase.
->>>>>>> 96db01aafe8acc35e65a533b0b61a7a3f00e6546
+Every component is open-source (MIT / Apache-2.0 / BSD or similar) and
+the system runs without any paid APIs. Per-component licence verification
+lives in [PRD.md](PRD.md) §14. The one gated exception is
+`CHAT_PROVIDER=openrouter`, which lets you A/B-test larger open-weight
+models that don't fit the local GPU — when enabled, retrieved passages
+leave the host, so leave it off unless that trade-off is acceptable. The
+default deployment stays strictly local.
