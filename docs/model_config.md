@@ -4,7 +4,7 @@
 > per-model system-prompt / tool-calling settings described here do not
 > apply to the new dashboard. The dashboard's answer model is set
 > entirely by `CHAT_MODEL` in `.env` (see
-> [DASHBOARD.md](../DASHBOARD.md)); there is no per-model UI to click
+> [dashboard.md](dashboard.md)); there is no per-model UI to click
 > through. This document is retained only as a record of the old setup.
 
 This is the human runbook for configuring the two chat models so they

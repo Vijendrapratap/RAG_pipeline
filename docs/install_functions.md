@@ -4,7 +4,7 @@
 > stack. The retrieval and analytics that used to be exposed as function
 > tools are now first-class endpoints on the dashboard API
 > (`POST /api/query`, `POST /api/search`, `GET /api/analytics/*`). See
-> [DASHBOARD.md](../DASHBOARD.md) for the new setup. This document is
+> [dashboard.md](dashboard.md) for the new setup. This document is
 > kept only as a historical record and for the legacy `eval/run_eval.py`
 > harness, which still imports `open_webui_functions/` directly.
 

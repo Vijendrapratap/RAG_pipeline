@@ -6,7 +6,7 @@
 > in-process inside the new `rag-api` container, and the React dashboard
 > is served from the same container at `/`. The retrieval *core* (Qdrant
 > dense + Tantivy BM25 + weighted RRF + bge-reranker-v2-m3) is unchanged —
-> see [DASHBOARD.md](../DASHBOARD.md) for the current architecture.
+> see [dashboard.md](dashboard.md) for the current architecture.
 
 ```
 ┌─────────────────────────── RTX 5070 host (Ubuntu 22.04+) ──────────────────────────┐

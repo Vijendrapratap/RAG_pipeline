@@ -6,8 +6,8 @@ Postgres database. This guide brings that machine up to date with the
 dashboard-track changes (Phases A–D). It is a handoff document: follow it
 top to bottom.
 
-For *what* changed and *why*, see [CHANGES.md](CHANGES.md) and
-[DASHBOARD.md](DASHBOARD.md). This file is only the operational steps.
+For *what* changed and *why*, see [changes.md](changes.md) and
+[dashboard.md](dashboard.md). This file is only the operational steps.
 
 ---
 
@@ -29,7 +29,7 @@ not part of this upgrade.
 ## Step 0 — Update the repository
 
 Pull the latest code (or copy the updated tree) onto the machine. New and
-changed files are listed in [CHANGES.md](CHANGES.md). No service needs to be
+changed files are listed in [changes.md](changes.md). No service needs to be
 stopped for this step.
 
 Confirm these new paths exist afterwards:
@@ -182,7 +182,7 @@ uvicorn rag_api.app:app --host 0.0.0.0 --port 8080  # or: python -m rag_api.app
 curl localhost:8080/api/health
 ```
 
-See [DASHBOARD.md](DASHBOARD.md) for the full endpoint reference. The React UI
+See [dashboard.md](dashboard.md) for the full endpoint reference. The React UI
 and the removal of Open WebUI are still upcoming (Phases E and F).
 
 ---

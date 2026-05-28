@@ -11,7 +11,7 @@ analytics tab.
 
 - Node 18+ (developed against Node 24).
 - The `rag-api` backend running and reachable. See the root
-  [DASHBOARD.md](../DASHBOARD.md). For local dev:
+  [docs/dashboard.md](../docs/dashboard.md). For local dev:
   ```bash
   uvicorn rag_api.app:app --host 0.0.0.0 --port 8080
   ```

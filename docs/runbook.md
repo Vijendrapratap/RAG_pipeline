@@ -6,7 +6,7 @@
 > in-process inside the `rag-api` container, reading the same
 > `data/tantivy/` directory ingestion writes to. Backup (`pg_dump`,
 > Qdrant snapshots, Tantivy rsync) is unchanged. See
-> [DASHBOARD.md](../DASHBOARD.md) for the current service layout.
+> [dashboard.md](dashboard.md) for the current service layout.
 
 Operational reference for a running `transcript-rag` deployment.
 Architecture: [architecture.md](architecture.md). Failure modes:

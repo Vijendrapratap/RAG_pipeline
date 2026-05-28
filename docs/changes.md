@@ -2,9 +2,9 @@
 
 A running record of every change made while replacing **Open WebUI** with a
 custom **FastAPI backend + React dashboard**. For the *why* and the
-architecture, see [DASHBOARD.md](DASHBOARD.md); for retrieval/ingestion
-internals see [PRD.md](PRD.md). To apply these changes to an
-already-running deployment, follow [UPGRADE.md](UPGRADE.md).
+architecture, see [dashboard.md](dashboard.md); for retrieval/ingestion
+internals see [PRD.md](../PRD.md). To apply these changes to an
+already-running deployment, follow [upgrade.md](upgrade.md).
 
 Phases A → F are complete — the Open WebUI cutover is done. **No git commits
 made on this track yet** — the git repo root is the whole `D:\` drive.

@@ -8,7 +8,7 @@ data problem. This file collects the patterns that work, the
 anti-patterns that don't, and the dashboard toggles to pair with each.
 
 For deployment / install, see [user_guide.md](user_guide.md). For the
-endpoints behind the dashboard, see [../DASHBOARD.md](../DASHBOARD.md).
+endpoints behind the dashboard, see [dashboard.md](dashboard.md).
 
 ---
 

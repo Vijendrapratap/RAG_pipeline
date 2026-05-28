@@ -5,8 +5,8 @@
 > at `http://localhost:8080/` (served by the `rag-api` container), and
 > Tantivy runs in-process inside that container. Ingestion, indexing,
 > chunking, and the eval harness still work as described. For the
-> dashboard-side flow see [DASHBOARD.md](../DASHBOARD.md); for upgrading
-> an existing deployment see [../UPGRADE.md](../UPGRADE.md).
+> dashboard-side flow see [dashboard.md](dashboard.md); for upgrading
+> an existing deployment see [upgrade.md](upgrade.md).
 
 End-to-end walkthrough from **"all code committed, nothing running"**
 to **"asking questions in Open WebUI and getting cited answers."**

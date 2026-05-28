@@ -1,7 +1,7 @@
 # Custom Dashboard Track
 
 Progress + reference for replacing **Open WebUI** with a lightweight custom
-dashboard. Companion to [PRD.md](PRD.md) (the original 13-phase build, still
+dashboard. Companion to [PRD.md](../PRD.md) (the original 13-phase build, still
 the source of truth for ingestion/retrieval internals).
 
 ---
@@ -292,7 +292,7 @@ bash scripts/00_health_check.sh    # all five services should be ✅
 ```
 
 For dashboard-only iteration (hot reload, no rebuild loop), see
-[frontend/README.md](frontend/README.md).
+[../frontend/README.md](../frontend/README.md).
 
 ## Notes / caveats
 
