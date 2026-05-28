@@ -24,8 +24,9 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-# Phase F: services/tantivy_server retired (Tantivy runs in-process inside
-# rag_api). `open_webui_functions` is retained on disk only for the legacy
-# eval/run_eval.py harness — it is no longer part of the deployed stack.
+# Tantivy runs in-process inside rag_api (the old :8765 sidecar was
+# retired in Phase F and removed from the tree). `open_webui_functions`
+# is retained only because the legacy eval/run_eval.py harness imports
+# it — it is no longer part of the deployed stack.
 include = ["ingestion*", "open_webui_functions*", "eval*", "rag_api*"]
 exclude = ["tests*", "data*", "dead_letter*"]
