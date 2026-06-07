@@ -44,14 +44,17 @@ Run the prompt in PRD §18. Begin with Phase 0.
 
 | Service | Port |
 |---|---|
-| Open WebUI | 8080 |
+| Dashboard (rag-api) | 8080 |
 | Ollama | 11434 |
 | Qdrant REST | 6333 |
 | Qdrant gRPC | 6334 |
-| Tantivy sidecar | 8765 |
 | Infinity reranker | 7997 |
 | Postgres | 5432 |
-| Redis | 6379 |
+
+> Local override on this dev box: rag-api is published on **8081** instead of 8080
+> (MiniTool ShadowMaker's `MTAgentService` auto-starts on 8080 at boot). The
+> override lives in `docker-compose.override.yml` and is gitignored — the
+> canonical port remains 8080.
 
 ## Container vs host names
 

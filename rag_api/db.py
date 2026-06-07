@@ -43,6 +43,22 @@ _ARRAY_FACETS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _distinct_performers(cur: Any) -> list[str]:
+    """Distinct performer names from catalog_sitting. Returns [] when the
+    catalog table is absent (DB predates Phase 14) — never raises."""
+    try:
+        cur.execute(
+            "SELECT DISTINCT v FROM catalog_sitting, UNNEST(performers) AS v "
+            "WHERE performers IS NOT NULL ORDER BY v"
+        )
+        return [r[0] for r in cur.fetchall()]
+    except psycopg2.Error:
+        # Roll back the aborted statement so the surrounding txn can continue.
+        cur.connection.rollback()
+        log.info("catalog_sitting absent — performers facet empty")
+        return []
+
+
 def get_filter_options(pg_dsn: str, statement_timeout_ms: int = 10_000) -> dict[str, list[Any]]:
     """Return distinct filter values from file_meta, keyed for the dashboard.
 
@@ -69,6 +85,9 @@ def get_filter_options(pg_dsn: str, statement_timeout_ms: int = 10_000) -> dict[
                     f"WHERE {col} IS NOT NULL ORDER BY v"
                 )
                 out[key] = [r[0] for r in cur.fetchall()]
+            # Phase 14: performers come from the curated catalog, not file_meta.
+            # Guarded — a DB predating the catalog tables simply yields none.
+            out["performers"] = _distinct_performers(cur)
         return out
     finally:
         conn.close()

@@ -88,18 +88,28 @@ def build_context_block(results: list[dict[str, Any]]) -> str:
 
 
 def build_system_prompt(answer_lang: str) -> str:
-    """System prompt: role, language, grounding + citation rules."""
+    """System prompt: role, language, grounding + citation rules.
+
+    The language directive is deliberately front-loaded and emphatic. With
+    reasoning disabled (CHAT_THINK=off) the model otherwise drifts to the
+    question's language instead of the requested one — a strong leading rule
+    keeps Hindi/English selection reliable without paying for a think chain.
+    """
     label = language_label(answer_lang)
     return (
         "You are a research assistant for the recorded discourses "
-        "(satsang / pravachan) of Swami ji. You answer strictly from the "
-        "transcript passages given in the user message.\n\n"
-        "Each passage has two parts and BOTH are part of the passage:\n"
+        "(satsang / pravachan) of Swami ji.\n\n"
+        f"LANGUAGE — your single most important rule: write your ENTIRE "
+        f"answer in {label}. This holds even when the question or the "
+        f"passages are in a different language. Never answer in any language "
+        f"other than {label}.\n\n"
+        "You answer strictly from the transcript passages given in the user "
+        "message. Each passage has two parts and BOTH are part of the "
+        "passage:\n"
         "  * METADATA — Event, Date, Time, Track, Type, Location, Season,\n"
         "    Speakers, Source, Timestamp. This is authoritative ground truth.\n"
         "  * TEXT — what Swami ji actually said.\n\n"
         "Rules:\n"
-        f"- Write your ENTIRE answer in {label}.\n"
         "- Use ONLY the numbered passages (METADATA + TEXT) as your source "
         "of truth. Do not use outside knowledge and do not invent quotes.\n"
         "- For 'when / where / who / what time / which event / which track' "
@@ -107,8 +117,9 @@ def build_system_prompt(answer_lang: str) -> str:
         "the TEXT body for these facts — they live in METADATA.\n"
         "- For 'what does Swami ji say / teach about X' questions, read the "
         "answer from the TEXT body and cite the source from METADATA.\n"
-        "- After each claim, cite the passage number(s) it came from, like "
-        "[1] or [2][3].\n"
+        "- Cite inline: after each claim, add the passage number(s) like [1] "
+        "or [2][3]. Do NOT append a list of the passages or echo their "
+        "METADATA/TEXT — cite inline only.\n"
         "- When you quote Swami ji, quote verbatim from the TEXT body.\n"
         "- If a passage's METADATA says 'Timestamp: timestamps unavailable', "
         "do not invent a time.\n"
@@ -118,15 +129,19 @@ def build_system_prompt(answer_lang: str) -> str:
     )
 
 
-def build_user_prompt(query: str, context_block: str) -> str:
-    """User-turn prompt: the passages, then the question."""
+def build_user_prompt(query: str, context_block: str, answer_lang: str) -> str:
+    """User-turn prompt: the passages, the question, then a closing language +
+    citation reminder that reinforces the system prompt for non-reasoning runs.
+    """
+    label = language_label(answer_lang)
     return (
         "Transcript passages:\n"
         "----------------------------------------\n"
         f"{context_block}\n"
         "----------------------------------------\n\n"
         f"Question: {query}\n\n"
-        "Answer using only the passages above, with [N] citations."
+        f"Answer in {label}, using only the passages above. Cite inline as "
+        "[N]; do not repeat the passages."
     )
 
 
@@ -230,14 +245,46 @@ class Synthesizer:
         context = build_context_block(results)
         return [
             {"role": "system", "content": build_system_prompt(answer_lang)},
-            {"role": "user", "content": build_user_prompt(query, context)},
+            {"role": "user",
+             "content": build_user_prompt(query, context, answer_lang)},
         ]
 
     def _ollama_options(self) -> dict[str, Any]:
         return {
             "temperature": self.settings.chat_temperature,
             "num_ctx": self.settings.chat_num_ctx,
+            "num_batch": self.settings.chat_num_batch,
         }
+
+    def _ollama_think(self) -> bool | None:
+        """Resolve CHAT_THINK to the ollama `think` flag (None = omit it).
+
+        Returning None leaves the request without a `think` key, so the model
+        keeps its own default — the safe choice for models that don't support
+        the flag at all.
+        """
+        v = (self.settings.chat_think or "auto").lower()
+        if v in ("off", "false", "no", "0"):
+            return False
+        if v in ("on", "true", "yes", "1"):
+            return True
+        return None
+
+    def _ollama_body(
+        self, query: str, results: list[dict[str, Any]], answer_lang: str,
+        model: str, *, stream: bool,
+    ) -> dict[str, Any]:
+        """Build the /api/chat request body, adding `think` only when set."""
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": self._messages(query, results, answer_lang),
+            "stream": stream,
+            "options": self._ollama_options(),
+        }
+        think = self._ollama_think()
+        if think is not None:
+            body["think"] = think
+        return body
 
     def _openrouter_headers(self) -> dict[str, str]:
         h = {
@@ -300,12 +347,8 @@ class Synthesizer:
     ) -> str:
         r = self._session.post(
             f"{self.settings.ollama_url}/api/chat",
-            json={
-                "model": model,
-                "messages": self._messages(query, results, answer_lang),
-                "stream": False,
-                "options": self._ollama_options(),
-            },
+            json=self._ollama_body(query, results, answer_lang, model,
+                                   stream=False),
             timeout=self.settings.chat_timeout_s,
         )
         r.raise_for_status()
@@ -373,12 +416,8 @@ class Synthesizer:
     ) -> Iterator[str]:
         with self._session.post(
             f"{self.settings.ollama_url}/api/chat",
-            json={
-                "model": model,
-                "messages": self._messages(query, results, answer_lang),
-                "stream": True,
-                "options": self._ollama_options(),
-            },
+            json=self._ollama_body(query, results, answer_lang, model,
+                                   stream=True),
             timeout=self.settings.chat_timeout_s,
             stream=True,
         ) as r:

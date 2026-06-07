@@ -95,6 +95,11 @@ def build_qdrant_filter(filters: dict[str, Any]) -> dict[str, Any] | None:
     if f.get("scriptures_referenced"):
         must.append({"key": "scriptures_referenced",
                      "match": {"any": list(f["scriptures_referenced"])}})
+    if f.get("performers"):
+        # Phase 14: performer credits backfilled from the curated catalog.
+        perf = f["performers"]
+        perf = [perf] if isinstance(perf, str) else list(perf)
+        must.append({"key": "performers", "match": {"any": perf}})
 
     return {"must": must} if must else None
 
@@ -161,6 +166,10 @@ def apply_post_filters(
     people_set = set(f["people_named"]) if f.get("people_named") else None
     scriptures_set = (set(f["scriptures_referenced"])
                       if f.get("scriptures_referenced") else None)
+    performers_set: set[str] | None = None
+    if f.get("performers"):
+        perf = f["performers"]
+        performers_set = {perf} if isinstance(perf, str) else set(perf)
 
     out: list[tuple[str, float, dict[str, Any]]] = []
     for cid, score, pl in fused:
@@ -203,6 +212,10 @@ def apply_post_filters(
             continue
         if scriptures_set is not None and not (
             scriptures_set & set(pl.get("scriptures_referenced") or [])
+        ):
+            continue
+        if performers_set is not None and not (
+            performers_set & set(pl.get("performers") or [])
         ):
             continue
         out.append((cid, score, pl))

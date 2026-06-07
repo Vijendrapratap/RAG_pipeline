@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -39,6 +40,7 @@ from rag_api.config import Settings, get_settings
 from rag_api.db import VocabCache
 from rag_api.history import History
 from rag_api.lang import resolve_language
+from rag_api.pageindex import PageIndexRetriever
 from rag_api.query_parse import detect_signals, merge_filters, signals_to_filters
 from rag_api.retrieval import Retriever
 from rag_api.synthesis import Synthesizer
@@ -78,11 +80,19 @@ class FilterModel(BaseModel):
 #   two_stage — summary search picks files, then chunk search within them
 RetrievalScope = Literal["chunks", "summaries", "two_stage"]
 
+# Retrieval backend:
+#   hybrid    — locked Qdrant + Tantivy + Infinity path (default, unchanged)
+#   pageindex — local LLM tree-reasoning over pre-built section trees (opt-in
+#               A/B comparison; see rag_api.pageindex). None => env default
+#               (RETRIEVAL_BACKEND), resolved in `_resolve_backend`.
+RetrievalBackend = Literal["hybrid", "pageindex"]
+
 
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     find_quote: bool = False
     scope: RetrievalScope = "chunks"
+    backend: RetrievalBackend | None = None
     top_k: int = Field(8, ge=1, le=40)
     filters: FilterModel = Field(default_factory=FilterModel)
     # Extract metadata filters from the query text. Strong signals (years,
@@ -100,6 +110,7 @@ class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
     find_quote: bool = False
     scope: RetrievalScope = "chunks"
+    backend: RetrievalBackend | None = None
     top_k: int = Field(8, ge=1, le=40)
     filters: FilterModel = Field(default_factory=FilterModel)
     auto_filters: bool = True
@@ -125,16 +136,23 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
     app.state.retriever = Retriever(settings)
+    # Additive, opt-in reasoning backend. Reuses the hybrid retriever for its
+    # stage-1 doc selection + reranking. Never engaged unless a request asks
+    # for backend=pageindex (or RETRIEVAL_BACKEND flips the default).
+    app.state.pageindex = PageIndexRetriever(settings, app.state.retriever)
     app.state.synthesizer = Synthesizer(settings)
     app.state.analytics = Analytics(settings.pg_dsn)
     app.state.history = History(settings.pg_dsn)
     app.state.vocab_cache = VocabCache()
     log.info(
-        "rag_api up — collection=%s bm25=%s chat=%s/%s auth=%s",
+        "rag_api up — collection=%s bm25=%s chat=%s/%s backend=%s "
+        "pageindex_trees=%d auth=%s",
         settings.qdrant_collection,
         app.state.retriever.bm25_enabled,
         app.state.synthesizer.provider,
         app.state.synthesizer.active_model,
+        settings.retrieval_backend,
+        len(app.state.pageindex.available_docs()),
         "on" if settings.dashboard_password else "OFF (dev)",
     )
     yield
@@ -241,6 +259,7 @@ def health() -> dict[str, Any]:
     monitor / the login screen can probe it."""
     s: Settings = app.state.settings
     retriever: Retriever = app.state.retriever
+    pageindex: PageIndexRetriever = app.state.pageindex
     synth: Synthesizer = app.state.synthesizer
     services = _check_services(s)
     # When CHAT_PROVIDER=openrouter, Ollama may still be running for
@@ -255,6 +274,8 @@ def health() -> dict[str, Any]:
         "services": services,
         "bm25_enabled": retriever.bm25_enabled,
         "tantivy_docs": retriever.tantivy_doc_count(),
+        "retrieval_backend": s.retrieval_backend,
+        "pageindex_trees": len(pageindex.available_docs()),
         "auth_required": bool(s.dashboard_password),
         "chat_provider": synth.provider,
         "chat_model": synth.active_model,
@@ -262,14 +283,25 @@ def health() -> dict[str, Any]:
     }
 
 
+def _resolve_backend(req: SearchRequest | QueryRequest) -> str:
+    """The effective retrieval backend: the per-request override if given, else
+    the env default (RETRIEVAL_BACKEND, normally 'hybrid')."""
+    return req.backend or app.state.settings.retrieval_backend
+
+
 def _retrieve(
-    retriever: Retriever, query: str, find_quote: bool, scope: str,
+    retriever: Retriever, pageindex: PageIndexRetriever, query: str,
+    find_quote: bool, scope: str, backend: str,
     filters: dict[str, Any], top_k: int, dense_text: str,
 ) -> list[dict[str, Any]]:
-    """Route a retrieval request to the right pipeline. `find_quote` is
-    always a chunk-level quote hunt, so scope is ignored when it is set."""
+    """Route a retrieval request to the right pipeline. `find_quote` is always
+    a chunk-level lexical quote hunt (hybrid only — PageIndex has no lexical
+    arm), so backend/scope are ignored when it is set. `backend=pageindex`
+    routes to LLM tree-reasoning; scope/HyDE do not apply there."""
     if find_quote:
         return retriever.find_quote(query, top_k)
+    if backend == "pageindex":
+        return pageindex.search(query, filters, top_k)
     dt = dense_text or None
     if scope == "summaries":
         return retriever.search_summaries(query, filters, top_k, dense_text=dt)
@@ -317,20 +349,26 @@ def search(req: SearchRequest) -> dict[str, Any]:
     """Retrieval only — structured results, no LLM synthesis (that is
     POST /api/query). `scope` selects chunk / summary / two-stage retrieval."""
     retriever: Retriever = app.state.retriever
+    pageindex: PageIndexRetriever = app.state.pageindex
+    backend = _resolve_backend(req)
     effective, detections, dense_text = _prepare(req)
+    t0 = time.monotonic()
     try:
-        results = _retrieve(retriever, req.query, req.find_quote, req.scope,
-                            effective, req.top_k, dense_text)
+        results = _retrieve(retriever, pageindex, req.query, req.find_quote,
+                            req.scope, backend, effective, req.top_k, dense_text)
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")
     except Exception as e:  # noqa: BLE001 - surface, don't swallow
         log.error("search failed for %r: %s", req.query, e)
         raise HTTPException(status_code=500, detail=f"retrieval failed: {e}")
+    retrieval_ms = round((time.monotonic() - t0) * 1000.0, 1)
     return {
         "query": req.query,
         "find_quote": req.find_quote,
         "scope": req.scope,
+        "backend": backend,
+        "retrieval_ms": retrieval_ms,
         "count": len(results),
         "results": results,
         "detected_filters": detections,
@@ -356,21 +394,25 @@ def query(req: QueryRequest):
     deltas, then `done` (or `error`).
     """
     retriever: Retriever = app.state.retriever
+    pageindex: PageIndexRetriever = app.state.pageindex
     synthesizer: Synthesizer = app.state.synthesizer
 
     # Per-request model override (400 if malformed). None,None = env default.
     override_provider, override_model = _resolve_model_choice(req)
 
+    backend = _resolve_backend(req)
     effective, detections, dense_text = _prepare(req)
+    t0 = time.monotonic()
     try:
-        results = _retrieve(retriever, req.query, req.find_quote, req.scope,
-                            effective, req.top_k, dense_text)
+        results = _retrieve(retriever, pageindex, req.query, req.find_quote,
+                            req.scope, backend, effective, req.top_k, dense_text)
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")
     except Exception as e:  # noqa: BLE001 - surface, don't swallow
         log.error("query retrieval failed for %r: %s", req.query, e)
         raise HTTPException(status_code=500, detail=f"retrieval failed: {e}")
+    retrieval_ms = round((time.monotonic() - t0) * 1000.0, 1)
 
     answer_language = resolve_language(req.answer_language, req.query)
 
@@ -387,6 +429,8 @@ def query(req: QueryRequest):
             "query": req.query,
             "find_quote": req.find_quote,
             "scope": req.scope,
+            "backend": backend,
+            "retrieval_ms": retrieval_ms,
             "answer_language": answer_language,
             "answer": answer,
             "count": len(results),
@@ -401,6 +445,8 @@ def query(req: QueryRequest):
             "query": req.query,
             "find_quote": req.find_quote,
             "scope": req.scope,
+            "backend": backend,
+            "retrieval_ms": retrieval_ms,
             "answer_language": answer_language,
             "count": len(results),
             "citations": results,

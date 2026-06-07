@@ -44,9 +44,10 @@ _VOCAB_FIELDS: tuple[tuple[str, str], ...] = (
     ("primary_languages", "primary_language"),
     ("topics", "topics"),
     ("scriptures_referenced", "scriptures_referenced"),
+    ("performers", "performers"),
 )
 # Filter fields that accept a list (OR within the field).
-_LIST_FIELDS = frozenset({"track_type", "topics", "scriptures_referenced"})
+_LIST_FIELDS = frozenset({"track_type", "topics", "scriptures_referenced", "performers"})
 # Vocab values shorter than this are too ambiguous to match on.
 _MIN_VOCAB_LEN = 3
 

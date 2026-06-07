@@ -99,9 +99,23 @@ class Settings(BaseModel):
     # 26B model later is a one-line .env change — no code edit.
     chat_model: str = os.environ.get("CHAT_MODEL", "qwen2.5:7b-instruct-q4_K_M")
     chat_num_ctx: int = int(os.environ.get("CHAT_NUM_CTX", "8192"))
+    # Prompt-processing batch size (ollama `num_batch`). RAG prompts are large
+    # (system prompt + retrieved passages near num_ctx), so prefill dominates
+    # time-to-first-token. A wider batch lets the GPU chew through the prompt
+    # faster — a pure throughput knob with no effect on output quality. 512 is
+    # ollama's default; 1024 noticeably cuts TTFT on the RTX 5090.
+    chat_num_batch: int = int(os.environ.get("CHAT_NUM_BATCH", "1024"))
     chat_temperature: float = float(os.environ.get("CHAT_TEMPERATURE", "0.2"))
     # Answer generation can take a while — separate, longer timeout.
     chat_timeout_s: float = float(os.environ.get("CHAT_TIMEOUT_S", "300"))
+    # Reasoning ("thinking") control for the local ollama provider. Thinking
+    # models (Qwen3.x, DeepSeek-R1) emit a hidden <think> chain before the
+    # answer — more deliberate, but it adds seconds of latency before the
+    # first visible token. "off" disables it for a large speed win; "on"
+    # forces it; "auto" (default) leaves the model's own behaviour untouched.
+    # NOTE: "off"/"on" require a thinking-capable model — Ollama rejects the
+    # flag on a plain model (e.g. qwen2.5). Keep "auto" if you run those.
+    chat_think: str = os.environ.get("CHAT_THINK", "auto").lower()
 
     # --- OpenRouter (optional cloud alternate; only read when chat_provider
     #     == "openrouter" OR when an OpenRouter model is picked from the
@@ -146,6 +160,36 @@ class Settings(BaseModel):
 
     # --- Tantivy — opened in-process (read-only), not the HTTP sidecar ---
     tantivy_dir: str = os.environ.get("TANTIVY_DIR", "./data/tantivy")
+
+    # --- PageIndex (alternate, opt-in retrieval backend for A/B comparison) ---
+    # Reasoning-based "vectorless" retrieval: per-document LLM-built section
+    # trees navigated by LLM reasoning instead of dense+BM25 fusion. This is an
+    # ADDITIVE benchmark backend — the default stays "hybrid", so the locked
+    # Qdrant+Tantivy+Infinity path is untouched unless a request opts in via
+    # `backend=pageindex`. Trees are JSON files under `pageindex_dir`, built
+    # offline by `ingestion.build_pageindex` over a bounded sample of files
+    # (you cannot tree-build the whole 5 TB corpus). The reasoning LLM is the
+    # local Ollama chat model — stays strictly local, no data leaves the box.
+    retrieval_backend: str = os.environ.get("RETRIEVAL_BACKEND", "hybrid").lower()
+    pageindex_dir: str = os.environ.get("PAGEINDEX_DIR", "./data/pageindex")
+    # Ollama model for tree-building (titles/summaries) and reasoning retrieval.
+    # Defaults to the chat model so a single local model serves both.
+    pageindex_model: str = os.environ.get(
+        "PAGEINDEX_MODEL",
+        os.environ.get("CHAT_MODEL", "qwen2.5:7b-instruct-q4_K_M"),
+    )
+    # Stage-1 fan-out: how many candidate documents (trees) the reasoning step
+    # considers per query. Summary search picks them; falls back to on-disk
+    # trees when the summary index is empty.
+    pageindex_candidate_docs: int = int(
+        os.environ.get("PAGEINDEX_CANDIDATE_DOCS", "5")
+    )
+    # Section granularity: consecutive chunks are grouped into one tree node
+    # until this token budget is hit. One LLM title+summary call per node, so
+    # smaller nodes = finer retrieval but a slower, costlier build.
+    pageindex_max_tokens_per_node: int = int(
+        os.environ.get("PAGEINDEX_MAX_TOKENS_PER_NODE", "1200")
+    )
 
     # --- Retrieval tuning ---
     candidates_per_source: int = int(os.environ.get("RAG_CANDIDATES", "40"))

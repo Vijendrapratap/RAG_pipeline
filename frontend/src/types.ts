@@ -11,6 +11,8 @@ export interface Health {
   services: { ollama: boolean; qdrant: boolean; reranker: boolean };
   bm25_enabled: boolean;
   tantivy_docs: number;
+  retrieval_backend: Backend;
+  pageindex_trees: number;
   auth_required: boolean;
   chat_provider: ChatProvider;
   chat_model: string;
@@ -35,6 +37,13 @@ export interface ModelsResponse {
 export type Scope = "chunks" | "summaries" | "two_stage";
 export type AnswerLanguage = "auto" | "hindi" | "english";
 
+/**
+ * Retrieval engine. "hybrid" is the default Qdrant+BM25+rerank path;
+ * "pageindex" is the opt-in LLM tree-reasoning backend for A/B comparison.
+ * Mirror of rag_api.app.RetrievalBackend.
+ */
+export type Backend = "hybrid" | "pageindex";
+
 /** Optional metadata filters. Mirror of rag_api.app.FilterModel. */
 export interface Filters {
   speaker?: string | null;
@@ -55,6 +64,7 @@ export interface SearchBody {
   query: string;
   find_quote: boolean;
   scope: Scope;
+  backend: Backend;
   top_k: number;
   filters: Filters;
   auto_filters: boolean;
@@ -127,6 +137,8 @@ export interface SearchResponse {
   query: string;
   find_quote: boolean;
   scope: string;
+  backend: Backend;
+  retrieval_ms: number;
   count: number;
   results: RetrievalResult[];
   detected_filters: Detection[];
@@ -140,6 +152,10 @@ export interface QueryMeta {
   query: string;
   find_quote: boolean;
   scope: string;
+  // Optional: present on live /api/query meta events, absent on metas
+  // hydrated from saved history (which doesn't persist engine/timing).
+  backend?: Backend;
+  retrieval_ms?: number;
   answer_language: string;
   count: number;
   citations: RetrievalResult[];

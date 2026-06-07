@@ -12,6 +12,7 @@ import {
 import { cleanFilters } from "../filters";
 import type {
   AnswerLanguage,
+  Backend,
   ChatModel,
   ChatProvider,
   Filters,
@@ -63,6 +64,7 @@ export function SearchView({
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<Mode>("answer");
   const [scope, setScope] = useState<Scope>("chunks");
+  const [backend, setBackend] = useState<Backend>("hybrid");
   const [topK, setTopK] = useState(8);
   const [findQuote, setFindQuote] = useState(false);
   const [autoFilters, setAutoFilters] = useState(true);
@@ -192,6 +194,14 @@ export function SearchView({
   const expanded = mode === "answer"
     ? !!meta?.expanded
     : !!searchResp?.expanded;
+  // Engine + retrieval latency, surfaced so the hybrid-vs-PageIndex speed
+  // difference is visible per turn. Guarded with != null so metas hydrated
+  // from older saved chats (no backend/timing fields) simply hide the badge.
+  const badgeSrc = mode === "answer" ? meta : searchResp;
+  const engineBadge =
+    badgeSrc && badgeSrc.retrieval_ms != null
+      ? { backend: badgeSrc.backend, ms: badgeSrc.retrieval_ms }
+      : null;
 
   function resetResponse() {
     setMeta(null);
@@ -230,6 +240,7 @@ export function SearchView({
       query: text,
       find_quote: findQuote,
       scope,
+      backend,
       top_k: topK,
       filters: cleaned,
       auto_filters: autoFilters,
@@ -355,7 +366,7 @@ export function SearchView({
               )}
 
               <div className="bubble-assistant">
-                <div className="bubble-avatar" aria-hidden="true" lang="hi">वि</div>
+                <img className="bubble-avatar bubble-avatar--logo" src="/logo.png" alt="" aria-hidden="true" />
                 <div className="bubble-content">
                   <DetectedFilters
                     detections={detections}
@@ -364,6 +375,20 @@ export function SearchView({
                     onAddFilter={setFilters}
                     expanded={expanded}
                   />
+                  {engineBadge && (
+                    <div
+                      className={
+                        "engine-badge engine-badge--" + engineBadge.backend
+                      }
+                      title="Retrieval engine and time spent fetching passages"
+                    >
+                      {engineBadge.backend === "pageindex"
+                        ? "PageIndex · LLM reasoning"
+                        : "Hybrid · vector + BM25"}
+                      {" · "}
+                      {Math.round(engineBadge.ms)} ms
+                    </div>
+                  )}
                   {mode === "answer" ? (
                     <AnswerPane
                       answer={answer}
@@ -392,6 +417,7 @@ export function SearchView({
           query={query} onQuery={setQuery}
           mode={mode} onMode={setMode}
           scope={scope} onScope={setScope}
+          backend={backend} onBackend={setBackend}
           topK={topK} onTopK={setTopK}
           findQuote={findQuote} onFindQuote={setFindQuote}
           autoFilters={autoFilters} onAutoFilters={setAutoFilters}
@@ -420,7 +446,7 @@ export function SearchView({
 function Welcome({ onExample }: { onExample: (text: string) => void }) {
   return (
     <div className="welcome">
-      <div className="welcome-mark" aria-hidden="true" lang="hi">वि</div>
+      <img className="welcome-mark welcome-mark--logo" src="/logo.png" alt="Vishvas Foundation" />
       <span className="welcome-eyebrow">Vishvas Foundation · Discourse Archive</span>
       <h2>Ask the archive</h2>
       <p>
@@ -428,6 +454,9 @@ function Welcome({ onExample }: { onExample: (text: string) => void }) {
         answer is grounded in passages from the source recording, with
         citations you can open to read or listen.
       </p>
+      <div className="welcome-divider" aria-hidden="true">
+        <span className="welcome-divider-mark" />
+      </div>
       <div className="welcome-examples-head">Try asking</div>
       <div className="welcome-examples">
         {EXAMPLES.map((ex) => (

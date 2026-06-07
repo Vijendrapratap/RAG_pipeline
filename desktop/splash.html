@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vishvas Foundation</title>
+    <style>
+      :root {
+        --surface-alt: #f9f2e3;
+        --accent: #a8451e;
+        --accent-glow: #c2562a;
+        --text-strong: #2a1c12;
+        --muted: #8a7a63;
+        --border: #e7dcc4;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; height: 100%;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: linear-gradient(180deg, var(--surface-alt) 0%, #f6efde 100%);
+        color: var(--text-strong);
+        user-select: none;
+        overflow: hidden;
+      }
+      .wrap {
+        height: 100%;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        gap: 18px; padding: 28px;
+        border: 1px solid var(--border);
+      }
+      .mark {
+        width: 72px; height: 72px; border-radius: 20px;
+        background: var(--accent-glow); color: #fff8ec;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 38px; font-weight: 600;
+        box-shadow:
+          inset 0 1px 0 rgba(255,240,220,0.25),
+          inset 0 -1px 0 rgba(60,20,5,0.30),
+          0 4px 12px rgba(90,32,10,0.30);
+      }
+      .mark-logo {
+        width: 76px; height: 76px; border-radius: 20px;
+        background: #fffdf8; object-fit: contain; padding: 6px;
+        box-shadow:
+          inset 0 0 0 1px rgba(120,60,20,0.08),
+          0 4px 12px rgba(90,32,10,0.20);
+      }
+      .name { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+      .sub {
+        font-size: 10px; color: var(--muted); margin-top: -10px;
+        text-transform: uppercase; letter-spacing: 0.18em; font-weight: 700;
+      }
+      .status { font-size: 13px; color: var(--muted); min-height: 18px; }
+      .bar {
+        width: 220px; height: 3px; border-radius: 999px;
+        background: var(--border); overflow: hidden; position: relative;
+      }
+      .bar::after {
+        content: ""; position: absolute; left: -40%; top: 0; bottom: 0; width: 40%;
+        background: var(--accent);
+        animation: slide 1.3s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% { left: -40%; } 100% { left: 100%; }
+      }
+      .error {
+        display: none; text-align: center;
+        color: var(--accent); font-size: 12.5px; white-space: pre-wrap;
+        line-height: 1.45; max-width: 380px;
+      }
+      .retry {
+        display: none; margin-top: 4px;
+        padding: 8px 18px; border-radius: 999px;
+        border: 1px solid var(--accent); background: transparent;
+        color: var(--accent); font-size: 13px; font-weight: 600; cursor: pointer;
+      }
+      .retry:hover { background: rgba(168,69,30,0.08); }
+      body.has-error .bar, body.has-error .status { display: none; }
+      body.has-error .error, body.has-error .retry { display: block; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <img class="mark-logo" src="assets/logo.png" alt="Vishvas Foundation"
+           onerror="this.outerHTML='&lt;div class=\'mark\' lang=\'hi\'&gt;वि&lt;/div&gt;'" />
+      <div>
+        <div class="name">Vishvas Foundation</div>
+        <div class="sub">Discourse Archive</div>
+      </div>
+      <div class="bar"></div>
+      <div class="status" id="status">Starting…</div>
+      <div class="error" id="error"></div>
+      <button class="retry" id="retry">Try again</button>
+    </div>
+    <script>
+      const statusEl = document.getElementById("status");
+      const errorEl = document.getElementById("error");
+      const retryEl = document.getElementById("retry");
+      window.vishvas.onStatus((msg) => { statusEl.textContent = msg; });
+      window.vishvas.onError((msg) => {
+        document.body.classList.add("has-error");
+        errorEl.textContent = msg;
+      });
+      retryEl.addEventListener("click", () => {
+        document.body.classList.remove("has-error");
+        statusEl.textContent = "Retrying…";
+        window.vishvas.retry();
+      });
+    </script>
+  </body>
+</html>

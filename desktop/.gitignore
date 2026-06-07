@@ -1,0 +1,4 @@
+node_modules/
+dist/
+desktop.config.json
+assets/icon.ico

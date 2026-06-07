@@ -85,3 +85,56 @@ CREATE INDEX IF NOT EXISTS idx_file_topics           ON file_meta USING GIN (top
 CREATE INDEX IF NOT EXISTS idx_file_people_named     ON file_meta USING GIN (people_named);
 CREATE INDEX IF NOT EXISTS idx_file_places_named     ON file_meta USING GIN (places_named);
 CREATE INDEX IF NOT EXISTS idx_file_scriptures_ref   ON file_meta USING GIN (scriptures_referenced);
+
+-- ============================================================================
+-- Phase 14 — curated catalog enrichment ('Camp Record Export' spreadsheet).
+-- ============================================================================
+-- A 34-year human-curated index of the same discourse corpus. These tables
+-- hold the catalog verbatim (loaded by ingestion/catalog/backfill.py); they
+-- are the authoritative source for performer credits, canonical (Devanagari)
+-- song titles, release references, and per-sitting hand transcriptions.
+-- Rows align to transcripts on the date-anchored join key
+-- ('YYYY-MM-DD|SEQ|TRACKNO') — the same key path_parser derives from folders.
+-- These tables are STANDALONE: loading them never touches chunk_meta /
+-- file_meta, so the running retrieval path is unaffected until backfill
+-- explicitly enriches Qdrant payloads.
+
+CREATE TABLE IF NOT EXISTS catalog_sitting (
+    sitting_key     TEXT PRIMARY KEY,          -- 'YYYY-MM-DD|SEQ|'
+    location        TEXT,                      -- normalized city facet
+    camp_place      TEXT,                      -- raw place, for display
+    camp_year       INTEGER,
+    year_reliable   BOOLEAN,
+    session_date    DATE,
+    session_seq     INTEGER,
+    session_time    TEXT,
+    season          TEXT,
+    track_count     INTEGER,
+    performers      TEXT[] DEFAULT '{}',
+    release_ref     TEXT,
+    venue           TEXT,
+    detail_contents TEXT,                      -- per-sitting hand transcription
+    loaded_at       TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cat_sit_date       ON catalog_sitting(session_date);
+CREATE INDEX IF NOT EXISTS idx_cat_sit_location   ON catalog_sitting(location);
+CREATE INDEX IF NOT EXISTS idx_cat_sit_season     ON catalog_sitting(season);
+CREATE INDEX IF NOT EXISTS idx_cat_sit_performers ON catalog_sitting USING GIN (performers);
+
+CREATE TABLE IF NOT EXISTS catalog_track (
+    join_key            TEXT PRIMARY KEY,       -- 'YYYY-MM-DD|SEQ|TRACKNO'
+    sitting_key         TEXT REFERENCES catalog_sitting(sitting_key),
+    location            TEXT,
+    session_date        DATE,
+    session_seq         INTEGER,
+    track_no            INTEGER,
+    track_title         TEXT,                   -- canonical song/bhajan title
+    track_type          TEXT,
+    duration_sec        INTEGER,
+    performers          TEXT[] DEFAULT '{}',
+    matched_source_file TEXT,                   -- set by backfill on alignment
+    loaded_at           TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cat_trk_sitting  ON catalog_track(sitting_key);
+CREATE INDEX IF NOT EXISTS idx_cat_trk_date     ON catalog_track(session_date);
+CREATE INDEX IF NOT EXISTS idx_cat_trk_matched  ON catalog_track(matched_source_file);

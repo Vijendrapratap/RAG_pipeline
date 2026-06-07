@@ -16,7 +16,19 @@ _VOCAB = {
     "primary_languages": ["hindi", "english"],
     "topics": ["karma-yoga", "self-inquiry"],
     "scriptures_referenced": ["Bhagavad Gita"],
+    "performers": ["Abhipsa", "Suman"],
 }
+
+
+def test_performer_name_detected_as_soft_list_signal():
+    sig = [s for s in detect_signals("bhajans sung by Abhipsa", _VOCAB)
+           if s["field"] == "performers"]
+    assert len(sig) == 1
+    assert sig[0]["value"] == "Abhipsa"
+    assert sig[0]["confidence"] == "soft"
+    # List-valued: include_soft accumulates into a list filter.
+    filters = signals_to_filters(sig, include_soft=True)
+    assert filters["performers"] == ["Abhipsa"]
 
 
 # ---- date signals (strong) -----------------------------------------------

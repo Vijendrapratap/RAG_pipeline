@@ -1,10 +1,18 @@
 import { useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
-import type { AnswerLanguage, ChatModel, Filters, Scope } from "../types";
+import type { AnswerLanguage, Backend, ChatModel, Filters, Scope } from "../types";
 import { countActive } from "../filters";
 
 export type Mode = "answer" | "search";
+
+// Answer-language choices, surfaced as a visible toggle in the composer bar
+// (not buried in Advanced) so picking Hindi / English is always one click.
+const LANG_OPTIONS: ReadonlyArray<readonly [AnswerLanguage, string]> = [
+  ["auto", "Auto"],
+  ["english", "English"],
+  ["hindi", "हिंदी"],
+];
 
 interface Props {
   query: string;
@@ -13,6 +21,8 @@ interface Props {
   onMode: (m: Mode) => void;
   scope: Scope;
   onScope: (s: Scope) => void;
+  backend: Backend;
+  onBackend: (b: Backend) => void;
   topK: number;
   onTopK: (n: number) => void;
   findQuote: boolean;
@@ -79,7 +89,7 @@ function SlidersIcon() {
  */
 export function QueryBar(props: Props) {
   const {
-    query, onQuery, mode, onMode, scope, onScope, topK, onTopK,
+    query, onQuery, mode, onMode, scope, onScope, backend, onBackend, topK, onTopK,
     findQuote, onFindQuote, autoFilters, onAutoFilters,
     expandQuery, onExpandQuery, answerLanguage, onAnswerLanguage,
     models, modelKey, onModelKey,
@@ -102,6 +112,10 @@ export function QueryBar(props: Props) {
   }
 
   const semanticDisabled = findQuote;
+  // PageIndex reasons over LLM-built section trees — scope (summaries /
+  // two-stage) and HyDE don't apply, so those controls are disabled for it.
+  const pageindexBackend = backend === "pageindex";
+  const scopeDisabled = running || semanticDisabled || pageindexBackend;
   const activeFilters = countActive(filters);
 
   return (
@@ -143,6 +157,24 @@ export function QueryBar(props: Props) {
           Advanced
         </button>
 
+        {mode === "answer" && (
+          <div className="lang-toggle" role="group" aria-label="Answer language">
+            {LANG_OPTIONS.map(([val, label]) => (
+              <button
+                key={val}
+                type="button"
+                className={"lang-opt" + (answerLanguage === val ? " lang-opt--active" : "")}
+                onClick={() => onAnswerLanguage(val)}
+                disabled={running}
+                title={`Answer in ${label}`}
+                lang={val === "hindi" ? "hi" : undefined}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         <span className="composer-hint">Press Enter to send · Shift + Enter for a new line</span>
 
         <div className="composer-spacer" />
@@ -178,13 +210,29 @@ export function QueryBar(props: Props) {
               </select>
             </label>
 
+            <label className="field-inline" title="Which retrieval engine answers — compare speed & quality">
+              <span>Engine</span>
+              <select
+                value={backend}
+                onChange={(e) => onBackend(e.target.value as Backend)}
+                disabled={running}
+              >
+                <option value="hybrid">Hybrid (vector + BM25)</option>
+                <option value="pageindex">PageIndex (LLM reasoning)</option>
+              </select>
+            </label>
+
             <label className="field-inline">
               <span>Search depth</span>
               <select
                 value={scope}
                 onChange={(e) => onScope(e.target.value as Scope)}
-                disabled={running || semanticDisabled}
-                title={semanticDisabled ? "ignored for quote hunts" : ""}
+                disabled={scopeDisabled}
+                title={
+                  pageindexBackend
+                    ? "PageIndex picks sections by reasoning — scope is ignored"
+                    : semanticDisabled ? "ignored for quote hunts" : ""
+                }
               >
                 <option value="chunks">Passages (default)</option>
                 <option value="summaries">Whole transcripts</option>
@@ -205,21 +253,6 @@ export function QueryBar(props: Props) {
                 disabled={running}
               />
             </label>
-
-            {mode === "answer" && (
-              <label className="field-inline">
-                <span>Answer in</span>
-                <select
-                  value={answerLanguage}
-                  onChange={(e) => onAnswerLanguage(e.target.value as AnswerLanguage)}
-                  disabled={running}
-                >
-                  <option value="auto">Auto (match question)</option>
-                  <option value="hindi">Hindi</option>
-                  <option value="english">English</option>
-                </select>
-              </label>
-            )}
 
             {mode === "answer" && showModelPicker && (
               <label className="field-inline" title="Which chat model writes the answer">
@@ -262,7 +295,7 @@ export function QueryBar(props: Props) {
                 type="checkbox"
                 checked={expandQuery}
                 onChange={(e) => onExpandQuery(e.target.checked)}
-                disabled={running || semanticDisabled}
+                disabled={running || semanticDisabled || pageindexBackend}
               />
               <span>Smart expand (HyDE)</span>
             </label>

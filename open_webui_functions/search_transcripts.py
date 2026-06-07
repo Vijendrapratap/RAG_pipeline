@@ -113,14 +113,16 @@ class Tools:
         topics: list[str] | None = None,
         people_named: list[str] | None = None,
         scriptures_referenced: list[str] | None = None,
+        performers: list[str] | str | None = None,
     ) -> list[dict[str, Any]]:
         """Qdrant ANN search. Returns list of {id, score, payload}.
 
         Phase 12 adds path-metadata filters (date_range, season, track_type,
         location, event_id). Phase 13 adds content-tag filters (event_type,
         primary_language, topics, people_named, scriptures_referenced).
-        Array filters (topics/people_named/scriptures_referenced) use
-        MatchAny — logical OR within the filter, AND across filters.
+        Phase 14 adds the performers filter (catalog-backfilled credits).
+        Array filters (topics/people_named/scriptures_referenced/performers)
+        use MatchAny — logical OR within the filter, AND across filters.
         """
         must: list[dict[str, Any]] = []
         if speaker:
@@ -151,6 +153,9 @@ class Tools:
         if scriptures_referenced:
             must.append({"key": "scriptures_referenced",
                          "match": {"any": list(scriptures_referenced)}})
+        if performers:
+            pf = [performers] if isinstance(performers, str) else list(performers)
+            must.append({"key": "performers", "match": {"any": pf}})
 
         body: dict[str, Any] = {
             "vector": vec,
@@ -288,10 +293,16 @@ class Tools:
                 meta_bits.append(f"Location: {pl['location']}")
             if pl.get("session_date"):
                 meta_bits.append(f"Date: {pl['session_date']}")
-            if pl.get("track_title"):
+            # Prefer the curated catalog's canonical (Devanagari) title when the
+            # backfill supplied one; fall back to the path-derived track title.
+            if pl.get("catalog_title"):
+                meta_bits.append(f"Track: {pl['catalog_title']}")
+            elif pl.get("track_title"):
                 meta_bits.append(f"Track: {pl['track_title']}")
             if pl.get("track_type"):
                 meta_bits.append(f"Type: {pl['track_type']}")
+            if pl.get("performers"):
+                meta_bits.append(f"Performers: {', '.join(pl['performers'])}")
             if pl.get("season"):
                 meta_bits.append(f"Season: {pl['season']}")
             # Phase 13 content tags — only printed when present.
@@ -330,6 +341,7 @@ class Tools:
         topics: list[str] | None = None,
         people_named: list[str] | None = None,
         scriptures_referenced: list[str] | None = None,
+        performers: list[str] | str | None = None,
     ) -> str:
         """Hybrid semantic + BM25 search over transcripts, with optional
         metadata filters. Two filter families:
@@ -382,6 +394,10 @@ class Tools:
             tag string — ASR transliterations may need spelling variants.
         :param scriptures_referenced: Optional list. e.g.
             ["Bhagavad Gita", "Upanishads", "Yoga Sutras"]. Logical OR.
+        :param performers: Optional list of singer/chorus names credited in the
+            curated catalog (e.g. ["Abhipsa", "Suman"]). Returns tracks those
+            people performed on. Logical OR within the list. Use for queries
+            like "bhajans sung by Abhipsa" -> performers=["Abhipsa"].
         :return: Formatted text with one block per result, including source
             file, timestamps, speakers, BM25/dense fused + reranked score,
             and the chunk text. Citations are surfaced in the chat UI.
@@ -398,6 +414,8 @@ class Tools:
             → event_type="satsang", people_named=["Anush"]
         - "Discourses about karma yoga"
             → topics=["karma-yoga"], track_type="discourse"
+        - "Bhajans sung by Abhipsa in 2005"
+            → performers=["Abhipsa"], date_range=("2005-01-01", "2005-12-31")
         """
         # Allow caller to dial top_k down per-call; cap at valves to keep
         # rerank batch reasonable.
@@ -410,6 +428,7 @@ class Tools:
             event_type=event_type, primary_language=primary_language,
             topics=topics, people_named=people_named,
             scriptures_referenced=scriptures_referenced,
+            performers=performers,
         )
         bm25 = self._bm25(query)
         fused = self._rrf(dense, bm25, self.valves.bm25_weight)
@@ -422,7 +441,7 @@ class Tools:
             speaker or source_file or season or track_type
             or location or event_id or date_range
             or event_type or primary_language or topics
-            or people_named or scriptures_referenced
+            or people_named or scriptures_referenced or performers
         )
         if any_filter:
             tt_set: set[str] | None = None
@@ -432,6 +451,10 @@ class Tools:
             people_set = set(people_named) if people_named else None
             scriptures_set = (set(scriptures_referenced)
                               if scriptures_referenced else None)
+            performers_set: set[str] | None = None
+            if performers:
+                performers_set = ({performers} if isinstance(performers, str)
+                                  else set(performers))
             filtered: list[tuple[str, float, dict[str, Any]]] = []
             for c, s, pl in fused:
                 if speaker and speaker not in (pl.get("speakers") or []):
@@ -465,6 +488,10 @@ class Tools:
                     continue
                 if scriptures_set is not None and not (
                     scriptures_set & set(pl.get("scriptures_referenced") or [])
+                ):
+                    continue
+                if performers_set is not None and not (
+                    performers_set & set(pl.get("performers") or [])
                 ):
                     continue
                 filtered.append((c, s, pl))

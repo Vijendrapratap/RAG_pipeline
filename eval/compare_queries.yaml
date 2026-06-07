@@ -1,0 +1,28 @@
+# Questions for the model A/B comparison (eval/compare_models.py).
+# Edit these to match the questions you actually care about. Mix languages and
+# question shapes — the point is to see how each model handles your real load.
+#
+# Fields:
+#   query            (required) the user question, as typed into the dashboard
+#   id               (optional) short label for the report; defaults to the query
+#   answer_language  (optional) auto | hindi | english (default: auto)
+
+- id: teach-english
+  query: "What does Swami ji teach about controlling the mind?"
+  answer_language: english
+
+- id: teach-hindi
+  query: "स्वामी जी मन को नियंत्रित करने के बारे में क्या कहते हैं?"
+  answer_language: hindi
+
+- id: meditation-english
+  query: "How does Swami ji describe the practice of meditation?"
+  answer_language: english
+
+- id: devotion-hindi
+  query: "भक्ति और प्रेम के विषय में स्वामी जी क्या समझाते हैं?"
+  answer_language: hindi
+
+- id: quote-find
+  query: "Find where Swami ji speaks about the nature of true happiness."
+  answer_language: english

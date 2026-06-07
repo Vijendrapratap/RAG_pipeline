@@ -56,9 +56,10 @@ def test_system_prompt_english():
 
 
 def test_user_prompt_contains_query_and_context():
-    up = build_user_prompt("what is karma yoga?", "CONTEXT_PLACEHOLDER")
+    up = build_user_prompt("what is karma yoga?", "CONTEXT_PLACEHOLDER", LANG_HINDI)
     assert "what is karma yoga?" in up
     assert "CONTEXT_PLACEHOLDER" in up
+    assert "Hindi" in up
 
 
 def test_no_context_messages_exist_for_both_languages():

@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to desktop.config.json and edit for this machine. All keys optional; env vars (VISHVAS_*) override these.",
+  "projectDir": "D:\\Vishvas-rag-pipeline",
+  "appPort": 8080,
+  "probePorts": [8080, 8081],
+  "dockerDesktop": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
+  "ollamaPort": 11434,
+  "chatModel": "qwen2.5:7b-instruct-q4_K_M",
+  "dockerStartTimeout": 120000,
+  "healthTimeout": 240000
+}

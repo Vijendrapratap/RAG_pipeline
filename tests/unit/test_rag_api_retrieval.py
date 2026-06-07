@@ -56,6 +56,18 @@ def test_date_range_builds_range_clause():
     }
 
 
+def test_performers_filter_uses_match_any():
+    qf = build_qdrant_filter({"performers": ["Abhipsa", "Suman"]})
+    assert qf["must"][0] == {
+        "key": "performers", "match": {"any": ["Abhipsa", "Suman"]}
+    }
+
+
+def test_performers_string_is_wrapped_in_list():
+    qf = build_qdrant_filter({"performers": "Abhipsa"})
+    assert qf["must"][0] == {"key": "performers", "match": {"any": ["Abhipsa"]}}
+
+
 # ---- rrf_fuse ------------------------------------------------------------
 
 
@@ -121,6 +133,15 @@ def test_post_filter_topics_match_any():
         ("b", 0.9, {"text": "y", "topics": ["bhakti"]}),
     ]
     kept = apply_post_filters(fused, {"topics": ["karma-yoga"]})
+    assert [cid for cid, _, _ in kept] == ["a"]
+
+
+def test_post_filter_performers_match_any():
+    fused = [
+        ("a", 1.0, {"text": "x", "performers": ["Abhipsa", "Suman"]}),
+        ("b", 0.9, {"text": "y", "performers": ["Prachi"]}),
+    ]
+    kept = apply_post_filters(fused, {"performers": ["Abhipsa"]})
     assert [cid for cid, _, _ in kept] == ["a"]
 
 

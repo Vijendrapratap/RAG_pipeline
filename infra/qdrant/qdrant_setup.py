@@ -55,6 +55,12 @@ def main():
         ("people_named",          PayloadSchemaType.KEYWORD),
         ("places_named",          PayloadSchemaType.KEYWORD),
         ("scriptures_referenced", PayloadSchemaType.KEYWORD),
+        # --- Phase 14 (catalog enrichment) ---
+        # performers: the new filter facet. session_seq / track_no: indexed so
+        # the backfill's date+seq+track set_payload filter is cheap.
+        ("performers",      PayloadSchemaType.KEYWORD),
+        ("session_seq",     PayloadSchemaType.INTEGER),
+        ("track_no",        PayloadSchemaType.INTEGER),
     ]:
         try:
             client.create_payload_index(COLLECTION, field, schema)

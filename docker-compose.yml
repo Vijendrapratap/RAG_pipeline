@@ -38,8 +38,14 @@ services:
       # Ollama path — swap to the fine-tuned 26B model here once it is ready.
       CHAT_MODEL: "${CHAT_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
       CHAT_NUM_CTX: "${CHAT_NUM_CTX:-8192}"
+      # Prefill batch size — wider = faster time-to-first-token on large RAG
+      # prompts, no effect on output quality. 512 is ollama's default.
+      CHAT_NUM_BATCH: "${CHAT_NUM_BATCH:-1024}"
       CHAT_TEMPERATURE: "${CHAT_TEMPERATURE:-0.2}"
       CHAT_TIMEOUT_S: "${CHAT_TIMEOUT_S:-300}"
+      # Reasoning toggle: "off" disables the thinking model's hidden <think>
+      # chain for much faster replies; "auto" (default) keeps it. See .env.
+      CHAT_THINK: "${CHAT_THINK:-auto}"
       # OpenRouter path — only read when CHAT_PROVIDER=openrouter. Empty key
       # is fine when running in local mode; populate it in `.env` to enable.
       OPENROUTER_URL: "${OPENROUTER_URL:-https://openrouter.ai/api/v1}"
@@ -69,10 +75,22 @@ services:
     ports: ["11434:11434"]
     volumes: [./data/ollama:/root/.ollama]
     environment:
-      OLLAMA_KEEP_ALIVE: "10m"
-      OLLAMA_NUM_PARALLEL: "2"
+      # -1 keeps the chat model resident in VRAM for the whole session so the
+      # first query after a launch is not slow. The desktop shell pre-warms it
+      # right after the stack comes up. Plenty of headroom on the RTX 5090.
+      OLLAMA_KEEP_ALIVE: "-1"
+      # Single-user desktop deployment: one request at a time. parallel=1 gives
+      # each request the full context window instead of splitting it across two
+      # slots, and trims scheduler overhead. Raise to 2 only if you need the
+      # embedding and chat models serving truly concurrent requests.
+      OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_MAX_LOADED_MODELS: "2"
       OLLAMA_FLASH_ATTENTION: "1"
+      # Quantize the KV cache to 8-bit (needs flash attention, set above).
+      # Halves KV-cache VRAM with quality indistinguishable from f16, freeing
+      # headroom to keep both models resident. q4_0 would be smaller but can
+      # dent quality — q8_0 is the quality-neutral choice.
+      OLLAMA_KV_CACHE_TYPE: "q8_0"
     deploy:
       resources:
         reservations:

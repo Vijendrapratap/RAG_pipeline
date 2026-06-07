@@ -160,7 +160,7 @@ export function Sidebar({
     <aside className={"sidebar" + (collapsed ? " sidebar--collapsed" : "")}>
       <div className="sidebar-head">
         <span className="brand">
-          <span className="brand-mark" aria-hidden="true" lang="hi">वि</span>
+          <img className="brand-mark brand-mark--logo" src="/logo.png" alt="" aria-hidden="true" />
           <span className="brand-text">
             <span className="brand-name">Vishvas Foundation</span>
             <span className="brand-sub">Discourse Archive</span>
