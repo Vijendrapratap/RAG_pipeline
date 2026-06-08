@@ -33,6 +33,25 @@ export function FilterPanel({ filters, options, dbOk, onChange, onClose }: Props
   function setList(field: keyof Filters, value: string) {
     onChange({ ...filters, [field]: value ? [value] : null });
   }
+  // Year range (coarse) — drives the same date_range as the precise picker
+  // below, so the two never conflict. From/To are forgiving of order.
+  const years = (options?.years ?? []) as string[];
+  const dr = filters.date_range;
+  const yearFrom = dr?.[0]?.slice(0, 4) ?? "";
+  const yearTo = dr?.[1]?.slice(0, 4) ?? "";
+  function setYear(which: "from" | "to", y: string) {
+    const f = which === "from" ? y : yearFrom;
+    const t = which === "to" ? y : yearTo;
+    if (!f && !t) {
+      onChange({ ...filters, date_range: null });
+      return;
+    }
+    const lo = f || t;
+    const hi = t || f;
+    const [a, b] = Number(lo) <= Number(hi) ? [lo, hi] : [hi, lo];
+    onChange({ ...filters, date_range: [`${a}-01-01`, `${b}-12-31`] });
+  }
+
   function setDate(idx: 0 | 1, value: string) {
     const current = filters.date_range ?? ["", ""];
     const next: [string, string] = [current[0], current[1]];
@@ -89,8 +108,28 @@ export function FilterPanel({ filters, options, dbOk, onChange, onClose }: Props
             );
           })}
 
+          {years.length > 0 && (
+            <div className="field field--range">
+              <span>Year range</span>
+              <div className="range-inputs">
+                <select value={yearFrom} onChange={(e) => setYear("from", e.target.value)}>
+                  <option value="">(any)</option>
+                  {years.map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+                <select value={yearTo} onChange={(e) => setYear("to", e.target.value)}>
+                  <option value="">(any)</option>
+                  {years.map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+
           <div className="field field--range">
-            <span>Date range</span>
+            <span>Date range (precise)</span>
             <div className="range-inputs">
               <input
                 type="date"

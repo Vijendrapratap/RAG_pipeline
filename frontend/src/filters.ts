@@ -20,7 +20,8 @@ export interface Facet {
 
 /** Facets that have a dropdown, in display order. */
 export const FACETS: Facet[] = [
-  { optionKey: "years", field: "year", label: "Year", isList: false },
+  // Year is handled by a dedicated From–To range control in FilterPanel
+  // (drives date_range), not a single-select facet.
   { optionKey: "seasons", field: "season", label: "Season", isList: false },
   { optionKey: "locations", field: "location", label: "Place", isList: false },
   { optionKey: "event_types", field: "event_type", label: "Event type", isList: false },
