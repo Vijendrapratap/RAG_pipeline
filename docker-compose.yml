@@ -18,6 +18,10 @@ services:
       # Read-only because the API is a reader; the ingestion job writes
       # to the same host directory directly.
       - ./data/tantivy:/app/data/tantivy:ro
+      # PageIndex section trees, built offline by ingestion.build_pageindex.
+      # Read-only for the same reason; without this mount the API sees an
+      # empty dir and the pageindex backend returns no results.
+      - ./data/pageindex:/app/data/pageindex:ro
     environment:
       # --- upstream services (docker DNS) ---
       OLLAMA_URL: "http://ollama:11434"
@@ -42,6 +46,8 @@ services:
       # prompts, no effect on output quality. 512 is ollama's default.
       CHAT_NUM_BATCH: "${CHAT_NUM_BATCH:-1024}"
       CHAT_TEMPERATURE: "${CHAT_TEMPERATURE:-0.2}"
+      # Anti-repetition penalty (1.0=off) — guards against degenerate loops.
+      CHAT_REPEAT_PENALTY: "${CHAT_REPEAT_PENALTY:-1.1}"
       CHAT_TIMEOUT_S: "${CHAT_TIMEOUT_S:-300}"
       # Reasoning toggle: "off" disables the thinking model's hidden <think>
       # chain for much faster replies; "auto" (default) keeps it. See .env.

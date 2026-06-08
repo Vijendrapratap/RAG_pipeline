@@ -254,6 +254,7 @@ class Synthesizer:
             "temperature": self.settings.chat_temperature,
             "num_ctx": self.settings.chat_num_ctx,
             "num_batch": self.settings.chat_num_batch,
+            "repeat_penalty": self.settings.chat_repeat_penalty,
         }
 
     def _ollama_think(self) -> bool | None:

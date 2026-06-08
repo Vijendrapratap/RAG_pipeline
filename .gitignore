@@ -21,6 +21,7 @@ dead_letter/
 ingest_progress.sqlite
 ingest.log
 ingest.log.*
+pageindex.log
 logs/*
 !logs/.gitkeep
 

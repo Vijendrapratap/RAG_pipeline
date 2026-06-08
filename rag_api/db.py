@@ -43,19 +43,16 @@ _ARRAY_FACETS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _distinct_performers(cur: Any) -> list[str]:
-    """Distinct performer names from catalog_sitting. Returns [] when the
-    catalog table is absent (DB predates Phase 14) — never raises."""
+def _safe_distinct(cur: Any, key: str, sql: str) -> list[str]:
+    """Run one facet's DISTINCT query, returning [] on any error instead of
+    raising. The connection is autocommit, so a failure here (missing table or
+    column on an older DB, a transient) is isolated to this one facet and never
+    blanks the others. Never raises."""
     try:
-        cur.execute(
-            "SELECT DISTINCT v FROM catalog_sitting, UNNEST(performers) AS v "
-            "WHERE performers IS NOT NULL ORDER BY v"
-        )
+        cur.execute(sql)
         return [r[0] for r in cur.fetchall()]
-    except psycopg2.Error:
-        # Roll back the aborted statement so the surrounding txn can continue.
-        cur.connection.rollback()
-        log.info("catalog_sitting absent — performers facet empty")
+    except psycopg2.Error as e:
+        log.info("filter facet %r unavailable: %s", key, str(e).strip())
         return []
 
 
@@ -69,25 +66,36 @@ def get_filter_options(pg_dsn: str, statement_timeout_ms: int = 10_000) -> dict[
         raise RuntimeError("psycopg2 not installed — cannot read filter options")
 
     conn = psycopg2.connect(pg_dsn, connect_timeout=5)
+    # Autocommit so each facet query is independent: one failing query (a
+    # transient, a missing column on an old DB, a startup race) must not abort a
+    # shared transaction and blank EVERY dropdown. Each facet degrades to [] on
+    # its own; the dashboard keeps all the facets that did resolve.
+    conn.autocommit = True
     try:
         out: dict[str, list[Any]] = {}
         with conn.cursor() as cur:
-            cur.execute(f"SET statement_timeout = {int(statement_timeout_ms)}")
+            try:
+                cur.execute(f"SET statement_timeout = {int(statement_timeout_ms)}")
+            except psycopg2.Error:  # pragma: no cover - defensive
+                pass
             for key, col in _SCALAR_FACETS:
-                cur.execute(
+                out[key] = _safe_distinct(
+                    cur, key,
                     f"SELECT DISTINCT {col} FROM file_meta "
-                    f"WHERE {col} IS NOT NULL ORDER BY {col}"
+                    f"WHERE {col} IS NOT NULL ORDER BY {col}",
                 )
-                out[key] = [r[0] for r in cur.fetchall()]
             for key, col in _ARRAY_FACETS:
-                cur.execute(
+                out[key] = _safe_distinct(
+                    cur, key,
                     f"SELECT DISTINCT v FROM file_meta, UNNEST({col}) AS v "
-                    f"WHERE {col} IS NOT NULL ORDER BY v"
+                    f"WHERE {col} IS NOT NULL ORDER BY v",
                 )
-                out[key] = [r[0] for r in cur.fetchall()]
             # Phase 14: performers come from the curated catalog, not file_meta.
-            # Guarded — a DB predating the catalog tables simply yields none.
-            out["performers"] = _distinct_performers(cur)
+            out["performers"] = _safe_distinct(
+                cur, "performers",
+                "SELECT DISTINCT v FROM catalog_sitting, UNNEST(performers) AS v "
+                "WHERE performers IS NOT NULL ORDER BY v",
+            )
         return out
     finally:
         conn.close()

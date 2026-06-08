@@ -112,6 +112,13 @@ class Settings(BaseModel):
     # ollama's default; 1024 noticeably cuts TTFT on the RTX 5090.
     chat_num_batch: int = int(os.environ.get("CHAT_NUM_BATCH", "1024"))
     chat_temperature: float = float(os.environ.get("CHAT_TEMPERATURE", "0.2"))
+    # Anti-repetition penalty (ollama `repeat_penalty`). 1.0 = off. A mild 1.1
+    # stops the rare degenerate loop where a small model repeats a sentence for
+    # hundreds of tokens (observed on qwen3.5:9b) — bounds worst-case latency
+    # without truncating good answers or harming normal phrasing. Quality-safe.
+    chat_repeat_penalty: float = float(
+        os.environ.get("CHAT_REPEAT_PENALTY", "1.1")
+    )
     # Answer generation can take a while — separate, longer timeout.
     chat_timeout_s: float = float(os.environ.get("CHAT_TIMEOUT_S", "300"))
     # Reasoning ("thinking") control for the local ollama provider. Thinking

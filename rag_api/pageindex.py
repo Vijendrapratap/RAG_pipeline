@@ -226,7 +226,15 @@ def ollama_generate_json(
     num_ctx: int, timeout: float,
 ) -> str:
     """POST /api/generate with format=json. Returns the raw response string.
-    Mirrors the call shape in `ingestion.enrich_content_tags`."""
+    Mirrors the call shape in `ingestion.enrich_content_tags`.
+
+    `think=False` is required: a thinking model (e.g. qwen3.5:9b) with
+    format=json routes its output into the `thinking` field and returns an
+    EMPTY `response`, so every title/summary/description and every reasoning
+    node-selection would parse to nothing. Disabling thinking is also accepted
+    by non-thinking models (qwen2.5:7b), so it is safe regardless of which
+    pageindex_model is configured.
+    """
     r = session.post(
         f"{ollama_url}/api/generate",
         json={
@@ -234,6 +242,7 @@ def ollama_generate_json(
             "prompt": prompt,
             "format": "json",
             "stream": False,
+            "think": False,
             "options": {"num_ctx": num_ctx, "temperature": 0.0},
         },
         timeout=timeout,

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Vishvas Foundation">
+  <title>Vishvas Foundation</title>
+  <defs>
+    <radialGradient id="halo" cx="50%" cy="44%" r="52%">
+      <stop offset="0%" stop-color="#FFE7B8"/>
+      <stop offset="70%" stop-color="#FFE7B8" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#FFE7B8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="flame" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#C8401A"/>
+      <stop offset="48%" stop-color="#F2832A"/>
+      <stop offset="100%" stop-color="#FFC83D"/>
+    </linearGradient>
+    <linearGradient id="inner" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#F4942F"/>
+      <stop offset="100%" stop-color="#FFEFA8"/>
+    </linearGradient>
+    <linearGradient id="bowl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#E9812E"/>
+      <stop offset="100%" stop-color="#A8431B"/>
+    </linearGradient>
+  </defs>
+
+  <!-- soft radiance -->
+  <circle cx="64" cy="54" r="50" fill="url(#halo)"/>
+
+  <!-- rays -->
+  <g stroke="#E8742A" stroke-width="3" stroke-linecap="round" opacity="0.55">
+    <line x1="64" y1="4"  x2="64" y2="15"/>
+    <line x1="100.9" y1="17.1" x2="93.2" y2="24.8"/>
+    <line x1="116" y1="54" x2="105" y2="54"/>
+    <line x1="27.1" y1="17.1" x2="34.8" y2="24.8"/>
+    <line x1="12" y1="54" x2="23" y2="54"/>
+  </g>
+
+  <!-- flame -->
+  <path d="M64 14 C 80 34, 84 52, 64 72 C 44 52, 48 34, 64 14 Z" fill="url(#flame)"/>
+  <!-- inner flame -->
+  <path d="M64 32 C 72 44, 73 55, 64 66 C 55 55, 56 44, 64 32 Z" fill="url(#inner)"/>
+
+  <!-- wick glow -->
+  <ellipse cx="64" cy="74" rx="5" ry="3.5" fill="#FFE08A"/>
+
+  <!-- diya bowl -->
+  <path d="M30 80 Q 64 86 98 80 Q 90 104 64 104 Q 38 104 30 80 Z" fill="url(#bowl)"/>
+  <path d="M30 80 Q 64 86 98 80" fill="none" stroke="#FFD79A" stroke-width="2.5" opacity="0.7"/>
+</svg>

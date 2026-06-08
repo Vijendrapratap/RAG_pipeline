@@ -13,8 +13,8 @@ interface Props {
 
 /**
  * Slide-in filter drawer. One dropdown per file_meta facet, plus a date-range
- * picker and a free-text speaker field. List-typed fields still send a one-
- * element array — that is what the backend expects.
+ * picker. List-typed fields still send a one-element array — that is what the
+ * backend expects. (No speaker filter: the corpus is a single voice, Guruji.)
  */
 export function FilterPanel({ filters, options, dbOk, onChange, onClose }: Props) {
   const active = countActive(filters);
@@ -61,18 +61,6 @@ export function FilterPanel({ filters, options, dbOk, onChange, onClose }: Props
               type a query.
             </div>
           )}
-
-          <label className="field">
-            <span>Speaker</span>
-            <input
-              type="text"
-              value={filters.speaker ?? ""}
-              placeholder="e.g. Swami Ji"
-              onChange={(e) =>
-                onChange({ ...filters, speaker: e.target.value || null })
-              }
-            />
-          </label>
 
           {FACETS.map((f) => {
             const opts = (options?.[f.optionKey] ?? []) as string[];

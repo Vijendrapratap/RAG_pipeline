@@ -37,7 +37,7 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
     <div className="login">
       <form className="login-card" onSubmit={submit}>
         <div className="login-brand">
-          <img className="brand-mark brand-mark--lg brand-mark--logo" src="/logo.png" alt="Vishvas Foundation" />
+          <img className="brand-mark brand-mark--lg brand-mark--logo" src="/logo.svg" alt="Vishvas Foundation" />
           <h1>Vishvas Foundation</h1>
           <span className="login-sub">Discourse Archive</span>
         </div>

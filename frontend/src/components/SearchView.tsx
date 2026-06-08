@@ -366,7 +366,7 @@ export function SearchView({
               )}
 
               <div className="bubble-assistant">
-                <img className="bubble-avatar bubble-avatar--logo" src="/logo.png" alt="" aria-hidden="true" />
+                <img className="bubble-avatar bubble-avatar--logo" src="/logo.svg" alt="" aria-hidden="true" />
                 <div className="bubble-content">
                   <DetectedFilters
                     detections={detections}
@@ -446,7 +446,7 @@ export function SearchView({
 function Welcome({ onExample }: { onExample: (text: string) => void }) {
   return (
     <div className="welcome">
-      <img className="welcome-mark welcome-mark--logo" src="/logo.png" alt="Vishvas Foundation" />
+      <img className="welcome-mark welcome-mark--logo" src="/logo.svg" alt="Vishvas Foundation" />
       <span className="welcome-eyebrow">Vishvas Foundation · Discourse Archive</span>
       <h2>Ask the archive</h2>
       <p>
