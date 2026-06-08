@@ -212,19 +212,23 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
   width: 64px; height: 64px; font-size: 32px; border-radius: 18px;
 }
 
-/* Logo-image variant of the brand marks. The logo is itself a saffron
-   illustration, so it sits on a light tile (not the saffron glyph tile) of
-   the same size/shape — layout and spacing are unchanged. `object-fit:
-   contain` + percentage padding scales cleanly across all four mark sizes. */
+/* Logo variant of the brand marks. The mark is an inline SVG (BrandMark) on a
+   light tile of the same size/shape — layout/spacing unchanged. The inner SVG
+   fills the padded tile. */
 .brand-mark--logo,
 .welcome-mark--logo,
 .bubble-avatar--logo {
   background: #fffdf8;
-  object-fit: contain;
-  padding: 8%;
+  padding: 14%;
   box-shadow:
     inset 0 0 0 1px rgba(120, 60, 20, 0.08),
     0 2px 6px rgba(90, 32, 10, 0.16);
+}
+/* The inline brand SVG fills the tile's content box (inside the padding). */
+.brand-mark-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 .welcome-mark--logo {
   box-shadow:
@@ -568,11 +572,11 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
   to   { opacity: 1; transform: translateY(0); }
 }
 .welcome-mark {
-  width: 76px; height: 76px; border-radius: 22px;
+  width: 56px; height: 56px; border-radius: 16px;
   background: var(--accent-glow);
   color: #fff8ec;
   display: inline-flex; align-items: center; justify-content: center;
-  font-family: var(--font-deva); font-weight: 600; font-size: 36px;
+  font-family: var(--font-deva); font-weight: 600; font-size: 28px;
   box-shadow:
     inset 0 1px 0 rgba(255, 240, 220, 0.22),
     inset 0 -1px 0 rgba(60, 20, 5, 0.30),

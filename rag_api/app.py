@@ -658,11 +658,27 @@ def history_delete(conversation_id: str) -> dict[str, Any]:
 # UI on :5173 and proxies /api → :8080).
 # --------------------------------------------------------------------------
 
+class _DashboardStatic(StaticFiles):
+    """StaticFiles that tells the browser never to cache the HTML shell.
+
+    Vite fingerprints JS/CSS (new filename per build) so those are safe to cache
+    forever — but `index.html` references them, and a browser that caches the
+    old index.html keeps loading the old bundle, so a redeploy appears to do
+    nothing (stale logo / UI). Marking HTML `no-cache` forces a revalidate, so
+    each deploy is picked up on a normal reload."""
+
+    async def get_response(self, path: str, scope: Any) -> Any:
+        resp = await super().get_response(path, scope)
+        if resp.headers.get("content-type", "").startswith("text/html"):
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+
+
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _STATIC_DIR.is_dir():
     # `html=True` makes StaticFiles return `index.html` for `/` and any
     # directory request — enough for this single-page UI (no client router).
-    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True),
+    app.mount("/", _DashboardStatic(directory=str(_STATIC_DIR), html=True),
               name="dashboard")
     log.info("dashboard static files mounted from %s", _STATIC_DIR)
 else:

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 
 import { ApiError, getFilters, setPassword } from "../api";
+import { BrandMark } from "./BrandMark";
 
 /**
  * Shared-password gate. Shown only when /api/health reports
@@ -37,7 +38,7 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
     <div className="login">
       <form className="login-card" onSubmit={submit}>
         <div className="login-brand">
-          <img className="brand-mark brand-mark--lg brand-mark--logo" src="/logo.svg" alt="Vishvas Foundation" />
+          <BrandMark className="brand-mark brand-mark--lg brand-mark--logo" />
           <h1>Vishvas Foundation</h1>
           <span className="login-sub">Discourse Archive</span>
         </div>

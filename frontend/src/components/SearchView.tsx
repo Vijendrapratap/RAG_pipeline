@@ -10,6 +10,7 @@ import {
   streamQuery,
 } from "../api";
 import { cleanFilters } from "../filters";
+import { BrandMark } from "./BrandMark";
 import type {
   AnswerLanguage,
   Backend,
@@ -371,7 +372,7 @@ export function SearchView({
               )}
 
               <div className="bubble-assistant">
-                <img className="bubble-avatar bubble-avatar--logo" src="/logo.svg" alt="" aria-hidden="true" />
+                <BrandMark className="bubble-avatar bubble-avatar--logo" decorative />
                 <div className="bubble-content">
                   <DetectedFilters
                     detections={detections}
@@ -451,7 +452,7 @@ export function SearchView({
 function Welcome({ onExample }: { onExample: (text: string) => void }) {
   return (
     <div className="welcome">
-      <img className="welcome-mark welcome-mark--logo" src="/logo.svg" alt="Vishvas Foundation" />
+      <BrandMark className="welcome-mark welcome-mark--logo" />
       <span className="welcome-eyebrow">Vishvas Foundation · Discourse Archive</span>
       <h2>Ask the archive</h2>
       <p>

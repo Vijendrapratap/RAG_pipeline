@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { ApiError, deleteHistoryItem, listHistory } from "../api";
 import type { ConversationSummary, Health } from "../types";
+import { BrandMark } from "./BrandMark";
 
 type Tab = "search" | "analytics";
 
@@ -160,7 +161,7 @@ export function Sidebar({
     <aside className={"sidebar" + (collapsed ? " sidebar--collapsed" : "")}>
       <div className="sidebar-head">
         <span className="brand">
-          <img className="brand-mark brand-mark--logo" src="/logo.svg" alt="" aria-hidden="true" />
+          <BrandMark className="brand-mark brand-mark--logo" decorative />
           <span className="brand-text">
             <span className="brand-name">Vishvas Foundation</span>
             <span className="brand-sub">Discourse Archive</span>
