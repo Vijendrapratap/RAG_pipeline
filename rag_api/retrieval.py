@@ -41,6 +41,8 @@ _META_FIELDS: tuple[str, ...] = (
     "session_date", "session_time", "track_no", "track_title", "track_type",
     "season", "event_type", "primary_language",
     "topics", "people_named", "places_named", "scriptures_referenced",
+    # Phase 14 catalog facets — present on catalog-source results.
+    "performers", "release_ref", "doc_type",
 )
 
 
@@ -223,9 +225,15 @@ def apply_post_filters(
 
 
 def to_result(cid: str, score: float, payload: dict[str, Any]) -> dict[str, Any]:
-    """Shape one fused/reranked chunk hit into the API result schema."""
+    """Shape one fused/reranked chunk hit into the API result schema.
+
+    `source` distinguishes the curated catalog from Whisper transcripts so the
+    UI can label them and the user can compare (Phase 14 separate source).
+    """
+    is_catalog = payload.get("source_type") == "catalog"
     return {
-        "result_type": "chunk",
+        "result_type": "catalog" if is_catalog else "chunk",
+        "source": "catalog" if is_catalog else "transcript",
         "chunk_id": cid,
         "score": round(float(score), 4),
         "text": payload.get("text", ""),
@@ -490,12 +498,19 @@ class Retriever:
         top_k: int = 8,
         bm25_weight: float | None = None,
         dense_text: str | None = None,
+        include_catalog: bool = False,
     ) -> list[dict[str, Any]]:
         """Hybrid semantic + BM25 search with optional metadata filters.
 
         `dense_text` is an optional HyDE hypothetical passage; when given it is
         blended into the dense vector (see `_query_vector`). BM25 always uses
         the raw query — lexical match should track the user's actual words.
+
+        When `include_catalog` is set, curated-catalog points are folded into
+        the candidate pool and reranked *together* with the transcript hits, so
+        the two sources interleave by relevance and each result is labelled by
+        `source`. A missing catalog collection degrades silently to
+        transcript-only.
 
         Returns up to `top_k` result dicts (see `to_result`), best first.
         """
@@ -507,11 +522,76 @@ class Retriever:
         bm25 = self._bm25(query)
         fused = rrf_fuse(dense, bm25, weight)
 
+        if include_catalog:
+            cat = self._catalog_dense(vec, filters)
+            fused = fused + [
+                (str(h["id"]), float(h.get("score", 0.0)), dict(h.get("payload") or {}))
+                for h in cat
+            ]
+
         if any(v for v in filters.values()):
             fused = apply_post_filters(fused, filters)
 
-        candidates = fused[: self.settings.candidates_per_source]
+        candidates = fused[: self.settings.candidates_per_source * (2 if include_catalog else 1)]
         reranked = self._rerank(query, candidates)
+        cap = min(top_k, self.settings.candidates_per_source)
+        return [to_result(c, s, pl) for c, s, pl in reranked[:cap]]
+
+    # ---- catalog-source retrieval (Phase 14, separate source) -----------
+
+    def _catalog_dense(
+        self, vec: list[float], filters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """ANN search over the standalone catalog collection. Returns [] (not
+        an error) if the collection does not exist yet — run
+        `ingestion.catalog.index_catalog --commit` to populate it."""
+        body: dict[str, Any] = {
+            "vector": vec,
+            "limit": self.settings.candidates_per_source,
+            "with_payload": True,
+            "with_vector": False,
+        }
+        qfilter = build_qdrant_filter(filters)
+        if qfilter:
+            body["filter"] = qfilter
+        headers = {"Content-Type": "application/json"}
+        if self.settings.qdrant_key:
+            headers["api-key"] = self.settings.qdrant_key
+        r = self._session.post(
+            f"{self.settings.qdrant_url}/collections/"
+            f"{self.settings.qdrant_catalog_collection}/points/search",
+            json=body, headers=headers, timeout=self.settings.http_timeout_s,
+        )
+        if r.status_code == 404:
+            log.warning(
+                "catalog collection %r not found — run "
+                "ingestion.catalog.index_catalog to enable catalog search",
+                self.settings.qdrant_catalog_collection,
+            )
+            return []
+        r.raise_for_status()
+        return r.json().get("result", [])
+
+    def search_catalog(
+        self,
+        query: str,
+        filters: dict[str, Any] | None = None,
+        top_k: int = 8,
+        dense_text: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Catalog-only search (the `catalog` scope): dense over the curated
+        collection + rerank. Use for performer/title/sitting-summary lookups
+        and Whisper-vs-catalog comparison."""
+        filters = filters or {}
+        vec = self._query_vector(query, dense_text)
+        hits = self._catalog_dense(vec, filters)
+        candidates = [
+            (str(h["id"]), float(h.get("score", 0.0)), dict(h.get("payload") or {}))
+            for h in hits
+        ]
+        if any(v for v in filters.values()):
+            candidates = apply_post_filters(candidates, filters)
+        reranked = self._rerank(query, candidates[: self.settings.candidates_per_source])
         cap = min(top_k, self.settings.candidates_per_source)
         return [to_result(c, s, pl) for c, s, pl in reranked[:cap]]
 

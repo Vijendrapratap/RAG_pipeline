@@ -161,6 +161,20 @@ def test_to_result_shapes_payload_and_omits_null_metadata():
     assert res["speakers"] == ["Swami ji"]
     assert res["metadata"] == {"season": "winter"}
     assert "track_title" not in res["metadata"]
+    # Default source label is 'transcript'.
+    assert res["source"] == "transcript"
+
+
+def test_to_result_labels_catalog_source():
+    res = to_result("cat1", 0.5, {
+        "text": "title", "source_type": "catalog", "doc_type": "track_title",
+        "track_title": "ओम गुरुवे नमः", "performers": ["Abhipsa", "Suman"],
+        "location": "NOIDA",
+    })
+    assert res["source"] == "catalog"
+    assert res["result_type"] == "catalog"
+    assert res["metadata"]["performers"] == ["Abhipsa", "Suman"]
+    assert res["metadata"]["track_title"] == "ओम गुरुवे नमः"
 
 
 # ---- source_file list filtering (two-stage retrieval) --------------------

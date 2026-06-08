@@ -1,28 +1,26 @@
-# Questions for the model A/B comparison (eval/compare_models.py).
-# Edit these to match the questions you actually care about. Mix languages and
-# question shapes — the point is to see how each model handles your real load.
-#
-# Fields:
-#   query            (required) the user question, as typed into the dashboard
-#   id               (optional) short label for the report; defaults to the query
-#   answer_language  (optional) auto | hindi | english (default: auto)
+# Speed + quality A/B questions — meditation, mind, consciousness.
+# Edit freely. Fields: query (required), id (optional), answer_language (auto|hindi|english).
 
-- id: teach-english
-  query: "What does Swami ji teach about controlling the mind?"
+- id: mind-consciousness
+  query: "What does Swami ji say about the relationship between the mind and consciousness?"
   answer_language: english
 
-- id: teach-hindi
-  query: "स्वामी जी मन को नियंत्रित करने के बारे में क्या कहते हैं?"
+- id: thoughtless-state
+  query: "How can one reach a thoughtless, silent state during meditation?"
+  answer_language: english
+
+- id: mind-vs-self
+  query: "What is the difference between the mind and the true self according to Swami ji?"
+  answer_language: english
+
+- id: witnessing
+  query: "What does Swami ji teach about awareness and being a witness to one's thoughts?"
+  answer_language: english
+
+- id: nature-of-consciousness
+  query: "What is the nature of consciousness in Swami ji's discourses?"
+  answer_language: english
+
+- id: meditation-hindi
+  query: "ध्यान के समय मन को शांत कैसे करें, स्वामी जी क्या मार्गदर्शन देते हैं?"
   answer_language: hindi
-
-- id: meditation-english
-  query: "How does Swami ji describe the practice of meditation?"
-  answer_language: english
-
-- id: devotion-hindi
-  query: "भक्ति और प्रेम के विषय में स्वामी जी क्या समझाते हैं?"
-  answer_language: hindi
-
-- id: quote-find
-  query: "Find where Swami ji speaks about the nature of true happiness."
-  answer_language: english

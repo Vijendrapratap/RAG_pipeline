@@ -84,6 +84,12 @@ class Settings(BaseModel):
     qdrant_summary_collection: str = os.environ.get(
         "QDRANT_SUMMARY_COLLECTION", "transcript_summaries"
     )
+    # Phase 14: standalone curated-catalog collection (hand transcriptions +
+    # canonical titles). Searched alongside transcripts as a separate, labelled
+    # source. Missing collection (404) degrades to transcript-only silently.
+    qdrant_catalog_collection: str = os.environ.get(
+        "QDRANT_CATALOG_COLLECTION", "catalog"
+    )
 
     # --- Chat provider ---
     # "ollama" (default — strictly local, per PRD) or "openrouter" (opt-in

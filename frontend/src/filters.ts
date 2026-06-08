@@ -28,6 +28,7 @@ export const FACETS: Facet[] = [
   { optionKey: "event_ids", field: "event_id", label: "Event", isList: false },
   { optionKey: "topics", field: "topics", label: "Topic", isList: true },
   { optionKey: "scriptures_referenced", field: "scriptures_referenced", label: "Scripture", isList: true },
+  { optionKey: "performers", field: "performers", label: "Performer", isList: true },
 ];
 
 /** Filter fields whose value is a list in the backend FilterModel. */
@@ -36,6 +37,7 @@ export const LIST_FIELDS = new Set<keyof Filters>([
   "topics",
   "scriptures_referenced",
   "people_named",
+  "performers",
 ]);
 
 /** Drop null / empty-string / empty-array entries — what is actually sent. */

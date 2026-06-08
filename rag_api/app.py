@@ -72,13 +72,16 @@ class FilterModel(BaseModel):
     topics: list[str] | None = None
     people_named: list[str] | None = None
     scriptures_referenced: list[str] | None = None
+    # Phase 14: curated-catalog performer credits (singers/chorus).
+    performers: list[str] | str | None = None
 
 
 # Retrieval scope:
-#   chunks    — hybrid chunk search (default; unchanged behaviour)
+#   chunks    — hybrid chunk search (default; transcripts + blended catalog)
 #   summaries — file-level summary search (cross-corpus / topic questions)
 #   two_stage — summary search picks files, then chunk search within them
-RetrievalScope = Literal["chunks", "summaries", "two_stage"]
+#   catalog   — curated-catalog only (performer/title lookups, accuracy A/B)
+RetrievalScope = Literal["chunks", "summaries", "two_stage", "catalog"]
 
 # Retrieval backend:
 #   hybrid    — locked Qdrant + Tantivy + Infinity path (default, unchanged)
@@ -102,6 +105,10 @@ class SearchRequest(BaseModel):
     # Expand the query with a HyDE hypothetical passage before dense search.
     # One extra chat-model call — opt-in.
     expand_query: bool = False
+    # Blend curated-catalog results into the chunk search (Phase 14). Active
+    # by default; a missing catalog collection degrades silently. Ignored for
+    # non-chunk scopes (use scope="catalog" for catalog-only).
+    include_catalog: bool = True
 
 
 class QueryRequest(BaseModel):
@@ -115,6 +122,8 @@ class QueryRequest(BaseModel):
     filters: FilterModel = Field(default_factory=FilterModel)
     auto_filters: bool = True
     expand_query: bool = False
+    # Blend curated-catalog results into the chunk search (Phase 14).
+    include_catalog: bool = True
     # 'auto' detects Hindi/English from the query; the others force it.
     answer_language: Literal["auto", "hindi", "english"] = "auto"
     # When true, the answer is streamed back as Server-Sent Events.
@@ -293,11 +302,14 @@ def _retrieve(
     retriever: Retriever, pageindex: PageIndexRetriever, query: str,
     find_quote: bool, scope: str, backend: str,
     filters: dict[str, Any], top_k: int, dense_text: str,
+    include_catalog: bool = False,
 ) -> list[dict[str, Any]]:
     """Route a retrieval request to the right pipeline. `find_quote` is always
     a chunk-level lexical quote hunt (hybrid only — PageIndex has no lexical
     arm), so backend/scope are ignored when it is set. `backend=pageindex`
-    routes to LLM tree-reasoning; scope/HyDE do not apply there."""
+    routes to LLM tree-reasoning; scope/HyDE do not apply there. `scope=catalog`
+    searches only the curated catalog; otherwise `include_catalog` blends it
+    into the chunk search (Phase 14)."""
     if find_quote:
         return retriever.find_quote(query, top_k)
     if backend == "pageindex":
@@ -307,7 +319,10 @@ def _retrieve(
         return retriever.search_summaries(query, filters, top_k, dense_text=dt)
     if scope == "two_stage":
         return retriever.search_two_stage(query, filters, top_k, dense_text=dt)
-    return retriever.search(query, filters, top_k, dense_text=dt)
+    if scope == "catalog":
+        return retriever.search_catalog(query, filters, top_k, dense_text=dt)
+    return retriever.search(query, filters, top_k, dense_text=dt,
+                            include_catalog=include_catalog)
 
 
 def _prepare(req: SearchRequest | QueryRequest) -> tuple[
@@ -355,7 +370,8 @@ def search(req: SearchRequest) -> dict[str, Any]:
     t0 = time.monotonic()
     try:
         results = _retrieve(retriever, pageindex, req.query, req.find_quote,
-                            req.scope, backend, effective, req.top_k, dense_text)
+                            req.scope, backend, effective, req.top_k, dense_text,
+                            include_catalog=req.include_catalog)
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")
@@ -405,7 +421,8 @@ def query(req: QueryRequest):
     t0 = time.monotonic()
     try:
         results = _retrieve(retriever, pageindex, req.query, req.find_quote,
-                            req.scope, backend, effective, req.top_k, dense_text)
+                            req.scope, backend, effective, req.top_k, dense_text,
+                            include_catalog=req.include_catalog)
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")

@@ -58,6 +58,8 @@ export interface Filters {
   topics?: string[] | null;
   people_named?: string[] | null;
   scriptures_referenced?: string[] | null;
+  /** Phase 14: curated-catalog performer credits (singers/chorus). */
+  performers?: string[] | null;
 }
 
 export interface SearchBody {
@@ -99,6 +101,8 @@ export interface FilterOptions {
   primary_languages: string[];
   topics: string[];
   scriptures_referenced: string[];
+  /** Phase 14: performer credits from the curated catalog. */
+  performers: string[];
 }
 
 export interface FilterOptionsResponse {

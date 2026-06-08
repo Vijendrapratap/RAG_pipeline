@@ -51,6 +51,24 @@ def _discover_models(api: str, password: str) -> list[str]:
     ]
 
 
+def _unload(ollama: str, model: str, timeout: float) -> None:
+    """Evict a model from VRAM (keep_alive=0, no prompt → unload, no generate).
+
+    Without this, switching between large models leaves the previous one
+    resident; the next model then gets a shrunken VRAM budget and spills to
+    CPU, which on a low-system-RAM box collapses to ~2 tok/s. Unloading first
+    gives every model a clean, comparable budget.
+    """
+    try:
+        requests.post(
+            f"{ollama}/api/generate",
+            json={"model": model, "keep_alive": 0},
+            timeout=min(timeout, 60.0),
+        )
+    except requests.RequestException:
+        pass
+
+
 def _warmup(ollama: str, model: str, timeout: float) -> None:
     """Load the model into VRAM so the first timed query isn't paying for it."""
     try:
@@ -114,6 +132,11 @@ def run(
     records: list[dict[str, Any]] = []
     for model in models:
         print(f"\n=== model: {model} ===")
+        # Evict the others so this model gets the full VRAM budget (avoids the
+        # partial-CPU-offload thrash when switching between large models).
+        for other in models:
+            if other != model:
+                _unload(ollama, other, timeout)
         _warmup(ollama, model, timeout)
         for q in queries:
             qid = q.get("id") or q["query"][:40]

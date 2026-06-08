@@ -104,7 +104,14 @@ def _upsert_postgres(tracks: list[CatalogTrack], dsn: str) -> tuple[int, int]:
         if not s["release_ref"] and t.release_ref:
             s["release_ref"] = t.release_ref
 
-    track_rows = [t for t in tracks if t.join_key]
+    # Dedup by join_key — the sheet has a few rows that normalise to the same
+    # date|seq|track_no. ON CONFLICT cannot update one row twice in a single
+    # execute_values batch, so collapse duplicates here (last wins).
+    track_by_key: dict[str, CatalogTrack] = {}
+    for t in tracks:
+        if t.join_key:
+            track_by_key[t.join_key] = t
+    track_rows = list(track_by_key.values())
 
     conn = psycopg2.connect(dsn)
     try:

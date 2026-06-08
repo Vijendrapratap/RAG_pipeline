@@ -55,7 +55,19 @@ and a no-op for tracks whose audio isn't ingested yet.
 |---|---|
 | `normalize.py` | Pure normalisation + join-key logic. No I/O. Unit-tested. |
 | `load.py`      | CLI: spreadsheet → clean CSVs + a sync-coverage report. Read-only wrt the stack. |
-| `backfill.py`  | CLI: catalog → Postgres tables + Qdrant payload enrichment. **Dry-run by default**; needs `--commit` to write. |
+| `backfill.py`  | **Merge** path: catalog → Postgres tables + Qdrant payload enrichment of existing chunks. Dry-run by default. |
+| `index_catalog.py` | **Separate-source** path (chosen): catalog → its own `catalog` Qdrant collection (detail_contents chunks + titles). Dry-run by default. Paired with `open_webui_functions/search_catalog.py` + `infra/qdrant/qdrant_catalog_setup.py`. |
+
+## Two ways to expose it (pick one)
+
+- **Separate source (current):** index into a standalone `catalog` collection and
+  search it with the parallel `search_catalog` tool. Zero risk to the running
+  index, clean Whisper-vs-catalog accuracy comparison, trivially reversible. Cost:
+  result-level duplication (dedup by `join_key` later). See
+  [docs/catalog_enrichment.md](../../docs/catalog_enrichment.md) §2.5.
+- **Merge (`backfill.py`):** enrich existing transcript chunks in place. One
+  unified result, no duplication, but mutates the live index and needs the
+  transcripts ingested first. On the shelf for later.
 
 ## Running it
 

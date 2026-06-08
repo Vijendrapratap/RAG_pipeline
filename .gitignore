@@ -12,6 +12,9 @@ doc.md
 # Phase 9 eval reports (per-run JSON; keep .gitkeep)
 eval/results/*.json
 
+# Model-comparison run outputs (generated; timestamped JSON/MD dumps)
+eval/compare_results/
+
 # Data and runtime state
 data/
 dead_letter/
