@@ -20,8 +20,9 @@ export interface Facet {
 
 /** Facets that have a dropdown, in display order. */
 export const FACETS: Facet[] = [
+  { optionKey: "years", field: "year", label: "Year", isList: false },
   { optionKey: "seasons", field: "season", label: "Season", isList: false },
-  { optionKey: "locations", field: "location", label: "Location", isList: false },
+  { optionKey: "locations", field: "location", label: "Place", isList: false },
   { optionKey: "event_types", field: "event_type", label: "Event type", isList: false },
   { optionKey: "track_types", field: "track_type", label: "Track type", isList: true },
   { optionKey: "primary_languages", field: "primary_language", label: "Language", isList: false },

@@ -96,9 +96,38 @@ def get_filter_options(pg_dsn: str, statement_timeout_ms: int = 10_000) -> dict[
                 "SELECT DISTINCT v FROM catalog_sitting, UNNEST(performers) AS v "
                 "WHERE performers IS NOT NULL ORDER BY v",
             )
+            # Phase 14: the curated catalog covers the whole 34-year archive,
+            # so its columns make the dropdowns rich even before audio is
+            # transcribed. Union the catalog's values into the location /
+            # season / track_type facets and add a `years` facet — these are
+            # the sheet columns the user browses by.
+            _union(out, "locations", _safe_distinct(
+                cur, "catalog_locations",
+                "SELECT DISTINCT location FROM catalog_sitting "
+                "WHERE location IS NOT NULL ORDER BY location"))
+            _union(out, "seasons", _safe_distinct(
+                cur, "catalog_seasons",
+                "SELECT DISTINCT season FROM catalog_sitting "
+                "WHERE season IS NOT NULL ORDER BY season"))
+            _union(out, "track_types", _safe_distinct(
+                cur, "catalog_track_types",
+                "SELECT DISTINCT track_type FROM catalog_track "
+                "WHERE track_type IS NOT NULL ORDER BY track_type"))
+            out["years"] = _safe_distinct(
+                cur, "years",
+                "SELECT DISTINCT camp_year::text FROM catalog_sitting "
+                "WHERE year_reliable AND camp_year IS NOT NULL "
+                "ORDER BY camp_year::text DESC")
         return out
     finally:
         conn.close()
+
+
+def _union(out: dict[str, list[Any]], key: str, extra: list[str]) -> None:
+    """Merge `extra` into out[key], dedup'd and sorted. Used to fold the
+    catalog's facet values into the transcript-derived ones."""
+    merged = set(out.get(key) or []) | set(extra)
+    out[key] = sorted(v for v in merged if v is not None)
 
 
 class VocabCache:

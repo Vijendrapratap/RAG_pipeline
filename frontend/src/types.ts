@@ -60,6 +60,8 @@ export interface Filters {
   scriptures_referenced?: string[] | null;
   /** Phase 14: curated-catalog performer credits (singers/chorus). */
   performers?: string[] | null;
+  /** Phase 14: camp year (sheet column CampYear). */
+  year?: string | null;
 }
 
 export interface SearchBody {
@@ -103,6 +105,8 @@ export interface FilterOptions {
   scriptures_referenced: string[];
   /** Phase 14: performer credits from the curated catalog. */
   performers: string[];
+  /** Phase 14: camp years from the curated catalog (newest first). */
+  years: string[];
 }
 
 export interface FilterOptionsResponse {

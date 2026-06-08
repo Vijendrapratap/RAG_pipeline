@@ -212,7 +212,13 @@ export function SearchView({
 
   async function onSubmit() {
     const text = query.trim();
-    if (!text || running) return;
+    const cleaned = cleanFilters(filters);
+    const hasFilters = Object.keys(cleaned).length > 0;
+    // Valid with query text OR active filters (the latter is a filter-only
+    // catalog browse). A query-less browse always uses the search endpoint —
+    // there is nothing to answer without a question.
+    if ((!text && !hasFilters) || running) return;
+    const browse = !text;
 
     // Submitting a question while viewing a past chat starts a fresh turn.
     if (viewingHistory || activeConversationId) {
@@ -221,13 +227,12 @@ export function SearchView({
     }
 
     resetResponse();
-    setLastSubmitted(text);
+    setLastSubmitted(text || "Browse by filters");
     setQuery("");
     setRunning(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
-    const cleaned = cleanFilters(filters);
     // Per-request model override. Send only when the user explicitly picked
     // a non-default; null = let the backend use its env default.
     const picked = modelKey
@@ -254,7 +259,7 @@ export function SearchView({
     let liveSearch = null as SearchResponse | null;
 
     try {
-      if (mode === "answer") {
+      if (mode === "answer" && !browse) {
         await streamQuery(
           { ...body, answer_language: answerLanguage },
           {

@@ -595,6 +595,50 @@ class Retriever:
         cap = min(top_k, self.settings.candidates_per_source)
         return [to_result(c, s, pl) for c, s, pl in reranked[:cap]]
 
+    def browse_catalog(
+        self, filters: dict[str, Any] | None = None, top_k: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Filter-only browse over the catalog — no query vector, no reranker.
+        Returns the catalog rows that match the metadata facets (place, year,
+        performer, track-type, season, date), newest first. This is what powers
+        "use the sheet's columns to get data directly": pick facets, get the
+        matching sheet entries (and, once mapped, the audio transcript).
+
+        Uses Qdrant scroll with the filter. A missing catalog collection (404)
+        degrades to []. Track-title rows are preferred over the long
+        hand-transcription chunks so the browse list stays scannable."""
+        filters = filters or {}
+        qfilter = build_qdrant_filter(filters)
+        body: dict[str, Any] = {
+            "limit": max(top_k * 4, self.settings.candidates_per_source),
+            "with_payload": True, "with_vector": False,
+        }
+        if qfilter:
+            body["filter"] = qfilter
+        headers = {"Content-Type": "application/json"}
+        if self.settings.qdrant_key:
+            headers["api-key"] = self.settings.qdrant_key
+        r = self._session.post(
+            f"{self.settings.qdrant_url}/collections/"
+            f"{self.settings.qdrant_catalog_collection}/points/scroll",
+            json=body, headers=headers, timeout=self.settings.http_timeout_s,
+        )
+        if r.status_code == 404:
+            log.warning("catalog collection not found — browse returns nothing")
+            return []
+        r.raise_for_status()
+        points = r.json().get("result", {}).get("points", [])
+        # Prefer canonical-title rows (one per track) for a scannable list;
+        # fall back to detail rows only if no titles match.
+        titles = [p for p in points if (p.get("payload") or {}).get("doc_type") == "track_title"]
+        chosen = titles or points
+        chosen.sort(
+            key=lambda p: (p.get("payload") or {}).get("session_date") or "",
+            reverse=True,
+        )
+        return [to_result(str(p["id"]), 0.0, dict(p.get("payload") or {}))
+                for p in chosen[:top_k]]
+
     def find_quote(self, partial_quote: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Locate an exact / near-exact phrase. BM25 is weighted heavily
         because lexical match matters more than semantics for quote recovery.

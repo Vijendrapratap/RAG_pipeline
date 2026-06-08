@@ -104,10 +104,15 @@ export function QueryBar(props: Props) {
 
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  const activeFilters = countActive(filters);
+  // A request is valid with either query text OR active filters — the latter
+  // is a filter-only browse over the catalog (Phase 14).
+  const canSubmit = query.trim().length > 0 || activeFilters > 0;
+
   function onKeyDown(e: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (!running && query.trim()) onSubmit();
+      if (!running && canSubmit) onSubmit();
     }
   }
 
@@ -116,7 +121,6 @@ export function QueryBar(props: Props) {
   // two-stage) and HyDE don't apply, so those controls are disabled for it.
   const pageindexBackend = backend === "pageindex";
   const scopeDisabled = running || semanticDisabled || pageindexBackend;
-  const activeFilters = countActive(filters);
 
   return (
     <div className={"composer" + (showAdvanced ? " composer--advanced" : "")}>
@@ -187,8 +191,8 @@ export function QueryBar(props: Props) {
           <button
             className="btn btn--primary btn--icon"
             onClick={onSubmit}
-            disabled={!query.trim()}
-            title="Send"
+            disabled={!canSubmit}
+            title={query.trim() ? "Send" : "Browse by filters"}
           >
             <SendIcon />
           </button>

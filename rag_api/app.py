@@ -74,6 +74,9 @@ class FilterModel(BaseModel):
     scriptures_referenced: list[str] | None = None
     # Phase 14: curated-catalog performer credits (singers/chorus).
     performers: list[str] | str | None = None
+    # Phase 14: camp year (sheet column CampYear). Translated to a session_date
+    # range so it filters both transcript and catalog by year.
+    year: str | int | None = None
 
 
 # Retrieval scope:
@@ -92,7 +95,9 @@ RetrievalBackend = Literal["hybrid", "pageindex"]
 
 
 class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=1)
+    # min_length 0: an empty query + filters is a valid "browse by facet"
+    # request (Phase 14) — return the catalog rows matching the filters.
+    query: str = Field("", min_length=0)
     find_quote: bool = False
     scope: RetrievalScope = "chunks"
     backend: RetrievalBackend | None = None
@@ -310,6 +315,12 @@ def _retrieve(
     routes to LLM tree-reasoning; scope/HyDE do not apply there. `scope=catalog`
     searches only the curated catalog; otherwise `include_catalog` blends it
     into the chunk search (Phase 14)."""
+    # Filter-only browse: no query text, just facets -> return the matching
+    # catalog rows directly (the sheet's data; the audio transcript once mapped).
+    if not (query or "").strip():
+        if any(v for v in filters.values()):
+            return retriever.browse_catalog(filters, top_k)
+        return []
     if find_quote:
         return retriever.find_quote(query, top_k)
     if backend == "pageindex":
@@ -351,6 +362,14 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
     detections = detect_signals(req.query, vocab)
     auto = signals_to_filters(detections) if req.auto_filters else {}
     effective = merge_filters(explicit, auto)
+
+    # Translate an explicit `year` facet into a session_date range (reuses all
+    # the existing date plumbing, and works on both transcript and catalog).
+    if effective.get("year") and not effective.get("date_range"):
+        y = str(effective["year"]).strip()
+        if y.isdigit():
+            effective["date_range"] = (f"{y}-01-01", f"{y}-12-31")
+    effective.pop("year", None)
 
     dense_text = ""
     if req.expand_query:
