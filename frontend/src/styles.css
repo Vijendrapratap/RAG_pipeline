@@ -221,7 +221,8 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .welcome-mark.welcome-mark--logo,
 .bubble-avatar.bubble-avatar--logo {
   background: #fff8ef;
-  padding: 17%;
+  border-radius: 50%;          /* Claude-style: a small round icon everywhere */
+  padding: 19%;
   box-shadow:
     inset 0 0 0 1px rgba(150, 84, 36, 0.14),
     0 1px 2px rgba(120, 60, 20, 0.12);
@@ -685,7 +686,7 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .bubble-assistant {
   align-self: flex-start;
   max-width: 100%;
-  display: flex; gap: 16px;
+  display: flex; gap: 12px; align-items: flex-start;
   animation: bubbleIn 420ms cubic-bezier(.22, .61, .36, 1);
 }
 .bubble-avatar {
