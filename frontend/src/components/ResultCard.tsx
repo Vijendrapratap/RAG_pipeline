@@ -22,22 +22,27 @@ export function ResultCard({ result, index, highlight }: Props) {
   const end = fmtTime(result.end_sec);
   const tsRange = start && end ? `${start}–${end}` : start ?? "";
 
+  const isCatalog = result.source === "catalog" || result.result_type === "catalog";
+  const meta = result.metadata as Record<string, unknown>;
+  // For catalog rows the raw source_file is "catalog:KEY" — show the canonical
+  // title / place instead so the sheet entry reads cleanly.
+  const sourceLabel = isCatalog
+    ? String(meta.track_title ?? meta.camp_place ?? meta.location ?? "Curated catalog")
+    : (result.source_file ?? "(unknown)");
+  const badgeClass = isCatalog
+    ? "badge--catalog"
+    : result.result_type === "summary" ? "badge--sum" : "badge--chunk";
+  const badgeText = isCatalog ? "Catalog · sheet" : result.result_type;
+
   return (
     <article
-      className={"card" + (highlight ? " card--flash" : "")}
+      className={"card" + (isCatalog ? " card--catalog" : "") + (highlight ? " card--flash" : "")}
       id={index !== undefined ? `cite-${index}` : undefined}
     >
       <header className="card-head">
         {index !== undefined && <span className="cite-num">[{index}]</span>}
-        <span className="card-source">{result.source_file ?? "(unknown)"}</span>
-        <span
-          className={
-            "badge " +
-            (result.result_type === "summary" ? "badge--sum" : "badge--chunk")
-          }
-        >
-          {result.result_type}
-        </span>
+        <span className="card-source">{sourceLabel}</span>
+        <span className={"badge " + badgeClass}>{badgeText}</span>
         {tsRange && <span className="card-time">{tsRange}</span>}
         <span className="card-score" title="fused score">
           {result.score.toFixed(3)}

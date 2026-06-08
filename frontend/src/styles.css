@@ -1145,6 +1145,10 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 }
 .badge--chunk { background: var(--accent-soft); color: var(--accent-deep); }
 .badge--sum   { background: #ede5f1; color: #4f3b5e; }
+/* Curated-catalog (the sheet) — a distinct teal so sheet rows are unmistakable
+   next to transcript hits. */
+.badge--catalog { background: #d7efe9; color: #1d6a59; }
+.card--catalog { border-left: 3px solid #2a8a74; }
 
 .card-text {
   margin: 0; font-size: 15px; line-height: 1.72;

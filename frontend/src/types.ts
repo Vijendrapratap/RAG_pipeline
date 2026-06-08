@@ -34,7 +34,7 @@ export interface ModelsResponse {
 
 // ---- request shapes ------------------------------------------------------
 
-export type Scope = "chunks" | "summaries" | "two_stage";
+export type Scope = "chunks" | "summaries" | "two_stage" | "catalog";
 export type AnswerLanguage = "auto" | "hindi" | "english";
 
 /**
@@ -126,7 +126,9 @@ export interface Detection {
 
 /** A chunk or summary hit — uniform shape from to_result / to_summary_result. */
 export interface RetrievalResult {
-  result_type: "chunk" | "summary";
+  result_type: "chunk" | "summary" | "catalog";
+  /** Which store the hit came from (Phase 14). */
+  source?: "transcript" | "catalog";
   chunk_id: string;
   score: number;
   text: string;

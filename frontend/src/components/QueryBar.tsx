@@ -241,6 +241,7 @@ export function QueryBar(props: Props) {
                 <option value="chunks">Passages (default)</option>
                 <option value="summaries">Whole transcripts</option>
                 <option value="two_stage">Best transcripts → passages</option>
+                <option value="catalog">Catalog only (the sheet)</option>
               </select>
             </label>
 
