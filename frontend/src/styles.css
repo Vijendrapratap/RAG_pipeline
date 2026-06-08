@@ -222,7 +222,8 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
 .bubble-avatar.bubble-avatar--logo {
   background: #fff8ef;
   border-radius: 50%;          /* Claude-style: a small round icon everywhere */
-  padding: 19%;
+  position: relative;
+  overflow: hidden;
   box-shadow:
     inset 0 0 0 1px rgba(150, 84, 36, 0.14),
     0 1px 2px rgba(120, 60, 20, 0.12);
@@ -233,11 +234,14 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
     0 6px 18px rgba(168, 69, 30, 0.12),
     0 1px 2px rgba(60, 40, 18, 0.10);
 }
-/* The inline brand SVG fills the tile's content box (inside the padding). */
+/* Absolutely positioned so the SVG can NEVER inflate the tile via flexbox
+   min-content sizing (that bug rendered the avatar as a giant circle). The
+   tile keeps its fixed pixel size; the flame scales to fill the inset area. */
 .brand-mark-svg {
-  width: 100%;
-  height: 100%;
-  display: block;
+  position: absolute;
+  inset: 22%;
+  width: auto;
+  height: auto;
 }
 .brand-text {
   display: flex; flex-direction: column;
