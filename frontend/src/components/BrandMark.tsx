@@ -19,20 +19,17 @@ export function BrandMark({ className, title = "Vishvas Foundation", decorative 
       aria-label={decorative ? undefined : title}
       aria-hidden={decorative ? true : undefined}
     >
-      <svg viewBox="0 0 128 128" className="brand-mark-svg" aria-hidden="true">
-        <defs>
-          <linearGradient id="vf-flame" x1="0" y1="1" x2="0" y2="0">
-            <stop offset="0" stopColor="#C8401A" />
-            <stop offset="0.5" stopColor="#F2832A" />
-            <stop offset="1" stopColor="#FFC83D" />
-          </linearGradient>
-        </defs>
-        {/* flame */}
-        <path d="M64 18 C 80 40, 84 58, 64 78 C 44 58, 48 40, 64 18 Z" fill="url(#vf-flame)" />
-        {/* inner highlight */}
-        <path d="M64 40 C 71 52, 72 62, 64 72 C 56 62, 57 52, 64 40 Z" fill="#FFE9A8" opacity="0.9" />
+      {/* Layered saffron diya flame — solid fills (no gradients / shared ids),
+          so it renders identically everywhere. */}
+      <svg viewBox="0 0 64 64" className="brand-mark-svg" aria-hidden="true">
         {/* diya bowl */}
-        <path d="M34 84 Q 64 92 94 84 Q 86 104 64 104 Q 42 104 34 84 Z" fill="#B6471C" />
+        <path d="M13 45 Q32 53 51 45 Q45 60 32 60 Q19 60 13 45 Z" fill="#9A3D18" />
+        {/* outer flame */}
+        <path d="M32 5 C 45 21, 47 34, 32 49 C 17 34, 19 21, 32 5 Z" fill="#E2641F" />
+        {/* mid flame */}
+        <path d="M32 13 C 41 25, 42 35, 32 46 C 22 35, 23 25, 32 13 Z" fill="#F59A2E" />
+        {/* inner flame */}
+        <path d="M32 24 C 38 31, 38 39, 32 45 C 26 39, 26 31, 32 24 Z" fill="#FFE08A" />
       </svg>
     </span>
   );
