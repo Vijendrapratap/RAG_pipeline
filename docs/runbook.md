@@ -20,6 +20,95 @@ appropriate.
 
 ---
 
+## 0. Operating & accessing the app (desktop)
+
+> This section is the **user-facing front end** — how a non-technical person
+> runs and uses the system. Sections 1+ below are operator/backend tasks.
+
+### 0.1 What the app is
+
+**Vishvas Foundation — Discourse Archive** is a small Windows desktop app
+(`desktop/`) that launches and supervises the whole stack, then shows the search
+dashboard in a normal window. The user never opens Docker, a terminal, or WSL —
+they double-click the icon and search. It does not bundle its own UI; the
+`rag-api` container serves the dashboard and the app points a window at it
+(`http://localhost:8081` here, canonically `8080`).
+
+### 0.2 Launching and accessing
+
+- **Open the app** from the Start menu / desktop shortcut. After a short branded
+  splash (cold start) or instantly (warm), the archive window opens.
+- **Access** is the app window itself — no URL to type. As a fallback, the same
+  dashboard opens in any browser at **http://localhost:8081** (8080 is taken by
+  MiniTool ShadowMaker's `MTAgentService` on this box, so the override publishes
+  8081; the launcher probes both automatically).
+- **Login:** if `DASHBOARD_PASSWORD` is set in `.env`, the dashboard shows a
+  login screen. The value lives in `.env` (gitignored) — never printed by
+  `/api/health` (which only exposes `auth_required`). Empty = no auth (dev only).
+- **Closing the window hides it to the tray** (stack stays warm); double-click
+  the tray icon or *Open Vishvas Archive* to reopen instantly. Single-instance:
+  re-clicking the icon just focuses the existing window.
+
+### 0.3 The system tray menu
+
+| Item | What it does |
+|---|---|
+| **Open Vishvas Archive** | Show/focus the window (same as double-clicking the tray icon) |
+| **● status line** | Read-only health, refreshed every 15s from `/api/health` — "All systems online" or "N services offline" |
+| **Restart services** | `docker compose restart` (in WSL) — first thing to try when the archive misbehaves |
+| **Quit (keep services warm)** | Closes the shell but **leaves containers running** — model stays in VRAM, next open is instant. The normal way to exit |
+| **Quit & stop services** | `docker compose stop` then quits — the **only** path that tears the stack down; next launch is a cold start |
+
+### 0.4 How startup works (and the bug it fixes)
+
+The launcher is the **single, authoritative starter**. All five services are set
+`restart: "no"` in `docker-compose.override.yml`, so nothing auto-starts at boot.
+When the app launches and the stack isn't already warm, it runs
+`docker compose up -d` **inside the Ubuntu WSL distro**
+(`wsl -d Ubuntu-24.04 … docker compose …`).
+
+This matters because the data bind-mounts use absolute WSL paths
+(`/home/pc/transcript-rag-data/…`, native ext4) that resolve to the **real data
+only when compose runs from inside Ubuntu**. The old `restart: unless-stopped`
+let Docker Desktop auto-start the stack at boot from its *own* VM, where those
+paths are **empty** — so everything came up blank (no models, vectors, or
+transcripts). The fix is two-part: `restart: "no"` stops the bad auto-start, and
+the launcher always starts from WSL. It even self-corrects leftovers: if a
+service answers but Ollama has **0 models**, `boot()` force-recreates from WSL
+("Repairing the archive…").
+
+Splash statuses you may see, in order: *Starting Docker → Starting services* (or
+*Repairing the archive*) *→ Waking the archive → Warming the answer model*.
+
+### 0.5 `/api/health` fields
+
+`GET http://localhost:8081/api/health` (unauthenticated by design; the tray polls
+it every 15s):
+
+| Field | Meaning |
+|---|---|
+| `ok` | Go/no-go: chat backend **and** Qdrant reachable (minimum to answer) |
+| `services` | `{ollama, qdrant, reranker}` reachability — drives the tray status line |
+| `bm25_enabled` / `tantivy_docs` | Tantivy BM25 loaded; doc count (`0` = lexical index didn't mount) |
+| `retrieval_backend` | Default pipeline (`hybrid`) |
+| `pageindex_trees` | PageIndex section trees on disk |
+| `auth_required` | `true` when `DASHBOARD_PASSWORD` is set (never exposes it) |
+| `chat_provider` / `chat_model` | `ollama` (local) or `openrouter`; active answer model (`qwen3.5:9b`) |
+| `embed_model` | Dense embedding model (`bge-m3`) |
+
+### 0.6 Desktop troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Archive opens but shows **no transcripts** / empty results | Empty-mount: stack came up on Docker Desktop's VM context where the data dirs are empty | Let the app self-heal (it force-recreates from WSL when Ollama has 0 models). If not, *Quit & stop services* → relaunch. Confirm `/api/health` shows `tantivy_docs > 0` |
+| First launch after reboot sits on the splash a long time | Cold start: Docker daemon down and/or pulling/loading the model | Wait (Docker ≤120s, health ≤240s). Every later launch is warm. If it errors, click *Try again* |
+| Splash error: "Could not start the archive…" | Docker Desktop missing/wrong path, WSL distro unavailable, or project files not where expected | Verify Docker Desktop installed (or set `VISHVAS_DOCKER_DESKTOP`), the `Ubuntu-24.04` distro exists, and `docker-compose.yml` + `.env` are present; click *Try again* |
+| Tray reads "● N services offline" | A container crashed or is slow | *Restart services*; re-check after ~15s. Still down → *Quit & stop services* → relaunch |
+| `http://localhost:8080` won't load on this box | Port 8080 held by `MTAgentService`; dashboard is on 8081 | Use **http://localhost:8081**, or just launch via the desktop app (probes both) |
+| First query slow though the window opened fast | Model wasn't resident yet (prewarm is best-effort) | No action; first query loads it, the rest are fast (`OLLAMA_KEEP_ALIVE=-1`) |
+
+---
+
 ## 1. Daily ops
 
 ### 1.1 Log review

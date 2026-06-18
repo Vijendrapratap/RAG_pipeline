@@ -23,10 +23,17 @@ from __future__ import annotations
 
 import datetime
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 CONFIDENCE_STRONG = "strong"
 CONFIDENCE_SOFT = "soft"
+
+# Devanagari Unicode block — used to recognise a pasted Hindi verbatim quote.
+_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
+# A trailing run of romanized / Latin text appended after a Devanagari quote,
+# e.g. "... ye kab kaha and kya bola gaya tha". Latin letters, digits, spaces
+# and light punctuation only — no Devanagari.
+_LATIN_TAIL_RE = re.compile(r"[\sA-Za-z0-9?.,!;:'\"()\-–—]+$")
 
 # A bare 4-digit year, not embedded in a longer number.
 _YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
@@ -159,3 +166,67 @@ def merge_filters(
         if merged.get(k) is None:
             merged[k] = v
     return merged
+
+
+class QuoteDetection(NamedTuple):
+    """Result of `detect_quote`.
+
+    is_quote      — route this query to lexical quote search.
+    query         — the query to retrieve with (trailing romanized tail removed
+                    when `is_quote`, else the original verbatim).
+    stripped_tail — the removed romanized meta-question, for transparency ("").
+    """
+    is_quote: bool
+    query: str
+    stripped_tail: str
+
+
+def _last_devanagari_index(s: str) -> int:
+    for i in range(len(s) - 1, -1, -1):
+        if "ऀ" <= s[i] <= "ॿ":
+            return i
+    return -1
+
+
+def detect_quote(query: str) -> QuoteDetection:
+    """Decide whether a query is a pasted Devanagari verbatim passage the user
+    wants *located* (→ lexical quote search), and strip any trailing romanized
+    meta-question.
+
+    Users naturally paste a remembered line plus a question — e.g.
+    ``"<long Hindi quote> ye kab kaha and kya bola gaya tha"`` — into the main
+    box. Run as a normal semantic query that fails: the English/romanized tail
+    dilutes the dense vector and the right chunk ranks far down. Detected as a
+    quote and cleaned, the same text resolves to the exact sitting.
+
+    Conservative by design — only a long, mostly-Devanagari passage qualifies,
+    so ordinary (short) Hindi questions keep the normal semantic path. A false
+    positive degrades gracefully: quote search is hybrid with a high BM25 weight,
+    so the dense arm still contributes. Pure: no I/O.
+    """
+    raw = (query or "").strip()
+    if not raw:
+        return QuoteDetection(False, query, "")
+
+    # Strip a romanized tail that follows the last Devanagari character.
+    cleaned, tail = raw, ""
+    last = _last_devanagari_index(raw)
+    if last != -1:
+        candidate = raw[last + 1:]
+        if candidate.strip() and _LATIN_TAIL_RE.fullmatch(candidate):
+            cleaned = raw[: last + 1].strip()
+            tail = candidate.strip()
+
+    words = cleaned.split()
+    letters = [c for c in cleaned if c.isalpha()]
+    deva = _DEVANAGARI_RE.findall(cleaned)
+    deva_ratio = (len(deva) / len(letters)) if letters else 0.0
+
+    long_passage = len(words) >= 12 and len(cleaned) >= 60
+    is_quote = deva_ratio >= 0.6 and (long_passage or (bool(tail) and len(words) >= 8))
+
+    if not is_quote:
+        return QuoteDetection(False, query, "")
+    return QuoteDetection(True, cleaned, tail)
+
+

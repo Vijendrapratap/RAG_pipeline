@@ -1,4 +1,98 @@
-# Upgrade Guide — applying the dashboard-track changes to a running system
+# Upgrade Guide
+
+> **This file covers two upgrades.** The most recent (2026-06-10: startup
+> reliability + model/retrieval changes) is first; the original dashboard-track
+> upgrade (Phases A–D) follows below.
+
+---
+
+## 2026-06-10 — Startup reliability, model & retrieval upgrades
+
+**Who this is for:** the operator of a running deployment, bringing it up to
+date with the changes made on 2026-06-10. **No data migration is required** —
+these are code + config changes plus a non-destructive container-policy change.
+
+### TL;DR
+
+| Change | What you do | Effect |
+|---|---|---|
+| Launcher owns startup (fixes blank-after-reboot) | Pull code; keep `restart: "no"` in the override; launch via the app | Stack reliably comes up **with data** |
+| Default model → `qwen3.5:9b` | Pull code; `ollama rm qwen2.5:7b-instruct-q4_K_M` (optional, frees ~4.7 GB) | Stronger default; old model gone |
+| Relevance-trim before synthesis | `SYNTH_MIN_SCORE_RATIO=0.2` (default) | Small model answers quote queries |
+| Auto-quote routing | none — automatic | Pasted Hindi quotes find their source |
+| Catalog reranker fix | none — automatic | Sheet results ordered sensibly |
+
+Everything here is additive or self-applying; the only manual bits are pulling
+the code and (optionally) deleting the retired model.
+
+### 1. Launcher owns startup — fixes "everything blank after reboot"
+
+**Symptom it fixes:** after a reboot the app opened but showed *no* transcripts
+/ "History unavailable" / empty results, even though everything "looked" up.
+
+**Cause:** the heavy data (72 GB Ollama, Qdrant, reranker, Postgres) is
+bind-mounted from WSL-native ext4 via absolute paths
+(`/home/pc/transcript-rag-data/...`, set in `docker-compose.override.yml`). Those
+paths resolve to the real data **only when `docker compose` runs inside the
+Ubuntu WSL distro.** When Docker Desktop auto-started the stack at boot (its
+`restart: unless-stopped` policy), the same paths resolved inside Docker's *own*
+VM, where they are empty — so the stack came up blank.
+
+**Fix (already applied on this machine):**
+- `docker-compose.override.yml` now sets `restart: "no"` on all five services,
+  so Docker Desktop no longer auto-resurrects them empty at boot.
+- The desktop launcher (`desktop/main.js`) runs `docker compose` **inside WSL**
+  (`wsl -d Ubuntu-24.04 … docker compose …`) so the mounts always resolve to the
+  real data, and **self-heals**: if a service answers but Ollama reports 0
+  models (the empty-mount signature), it force-recreates from WSL.
+- The launcher's stale `chatModel` default was corrected to `qwen3.5:9b`.
+
+**To apply on another machine / after pulling code:**
+1. Pull the latest code (`desktop/main.js`, `desktop/config.js`).
+2. Ensure `docker-compose.override.yml` has `restart: "no"` on the services
+   (it's gitignored — copy it onto the target box).
+3. Apply the policy to already-running containers without recreating them:
+   ```bash
+   docker update --restart no ollama qdrant postgres reranker rag-api
+   ```
+4. From then on, **start the stack by opening the Vishvas app** (or, from
+   Ubuntu, `docker compose up -d`). Don't rely on boot auto-start.
+
+See [runbook.md](runbook.md) → *Operating & accessing the app* for the full
+launch/operate model.
+
+### 2. Default chat model is now `qwen3.5:9b` (qwen2.5:7b removed)
+
+Every committed default was repointed off the old model
+(`rag_api/config.py` `chat_model` + `pageindex_model` fallback,
+`docker-compose.yml` `CHAT_MODEL`, `.env.example`), so a fresh deploy can't fall
+back to a missing model. To reclaim space on an existing box:
+
+```bash
+docker exec ollama ollama rm qwen2.5:7b-instruct-q4_K_M   # frees ~4.7 GB
+```
+
+Remaining models: `qwen3.5:9b` (default), `qwen3:14b`, `qwen3.5:27b`,
+`gemma4:26b`, `gemma4:31b`, `deepseek-r1:7b`.
+
+### 3. Relevance-trim before synthesis (`SYNTH_MIN_SCORE_RATIO`)
+
+Before passages go to the answer model, those scoring below
+`SYNTH_MIN_SCORE_RATIO` (default **0.2**) of the top hit are dropped, so a small
+model isn't shown mostly-noise citations and refusing ("not found"). Display
+citations are unchanged. No action needed; tune via the env var if desired.
+
+### 4 & 5. Auto-quote routing + catalog reranker fix
+
+Both are automatic, no config. Pasting a Hindi passage (optionally with a
+romanized "when/what was said" tail) now routes to exact-match quote search
+while still answering your question; catalog/sheet rows are reranked against a
+composed sentence so relevant sittings rank above bare-metadata rows instead of
+all clustering near 0.03.
+
+---
+
+## Earlier — dashboard-track upgrade (Phases A–D)
 
 **Who this is for:** the operator of an *existing* `transcript-rag` deployment
 — a machine that has already run the original pipeline and has a populated

@@ -40,7 +40,7 @@ services:
       # When openrouter, retrieved chunks leave the host — gated trade-off.
       CHAT_PROVIDER: "${CHAT_PROVIDER:-ollama}"
       # Ollama path — swap to the fine-tuned 26B model here once it is ready.
-      CHAT_MODEL: "${CHAT_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
+      CHAT_MODEL: "${CHAT_MODEL:-qwen3.5:9b}"
       CHAT_NUM_CTX: "${CHAT_NUM_CTX:-8192}"
       # Prefill batch size — wider = faster time-to-first-token on large RAG
       # prompts, no effect on output quality. 512 is ollama's default.
@@ -85,11 +85,11 @@ services:
       # first query after a launch is not slow. The desktop shell pre-warms it
       # right after the stack comes up. Plenty of headroom on the RTX 5090.
       OLLAMA_KEEP_ALIVE: "-1"
-      # Single-user desktop deployment: one request at a time. parallel=1 gives
-      # each request the full context window instead of splitting it across two
-      # slots, and trims scheduler overhead. Raise to 2 only if you need the
-      # embedding and chat models serving truly concurrent requests.
-      OLLAMA_NUM_PARALLEL: "1"
+      # Two parallel slots — allows the embedding and chat model to serve
+      # concurrent LAN requests without blocking each other. Each slot gets
+      # half the context window; raise back to 1 if you need the full 8k ctx
+      # for a single user and latency under load is not a concern.
+      OLLAMA_NUM_PARALLEL: "2"
       OLLAMA_MAX_LOADED_MODELS: "2"
       OLLAMA_FLASH_ATTENTION: "1"
       # Quantize the KV cache to 8-bit (needs flash attention, set above).

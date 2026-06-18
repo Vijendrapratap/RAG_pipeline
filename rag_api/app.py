@@ -41,7 +41,9 @@ from rag_api.db import VocabCache
 from rag_api.history import History
 from rag_api.lang import resolve_language
 from rag_api.pageindex import PageIndexRetriever
-from rag_api.query_parse import detect_signals, merge_filters, signals_to_filters
+from rag_api.query_parse import (
+    detect_quote, detect_signals, merge_filters, signals_to_filters,
+)
 from rag_api.retrieval import Retriever
 from rag_api.synthesis import Synthesizer
 
@@ -337,23 +339,35 @@ def _retrieve(
 
 
 def _prepare(req: SearchRequest | QueryRequest) -> tuple[
-    dict[str, Any], list[dict[str, Any]], str
+    dict[str, Any], list[dict[str, Any]], str, bool, str
 ]:
     """Phase-D pre-retrieval planning, shared by /api/search and /api/query.
 
-    Returns ``(effective_filters, detections, dense_text)``:
+    Returns ``(effective_filters, detections, dense_text, find_quote, query)``:
       * effective_filters — explicit request filters merged with auto-extracted
         strong signals (explicit always wins);
       * detections — every signal found in the query text, for the UI to show
         as removable / applyable chips;
       * dense_text — a HyDE hypothetical passage when `expand_query` is set,
-        else "".
+        else "";
+      * find_quote — effective quote-mode flag: the request's, OR auto-detected
+        when the query is a pasted Devanagari verbatim passage;
+      * query — the text to retrieve with: the original, or (when a quote is
+        auto-detected) the quote with its trailing romanized question stripped.
 
-    A `find_quote` request skips both: it is a lexical exact-phrase hunt, so
-    metadata filters and semantic expansion do not apply.
+    A `find_quote` request — explicit or auto-detected — skips filters and HyDE:
+    it is a lexical exact-phrase hunt, so metadata filters and semantic
+    expansion do not apply. (Synthesis/language detection still use the caller's
+    original query, so the model answers the user's actual question.)
     """
-    if req.find_quote:
-        return {}, [], ""
+    find_quote, query = req.find_quote, req.query
+    if not find_quote:
+        qd = detect_quote(req.query)
+        if qd.is_quote:
+            find_quote, query = True, qd.query
+
+    if find_quote:
+        return {}, [], "", find_quote, query
 
     s: Settings = app.state.settings
     explicit = {k: v for k, v in req.filters.model_dump().items()
@@ -375,7 +389,7 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
     if req.expand_query:
         dense_text = app.state.retriever.make_expansion(req.query)
 
-    return effective, detections, dense_text
+    return effective, detections, dense_text, find_quote, query
 
 
 @app.post("/api/search", dependencies=[Depends(require_auth)])
@@ -385,10 +399,10 @@ def search(req: SearchRequest) -> dict[str, Any]:
     retriever: Retriever = app.state.retriever
     pageindex: PageIndexRetriever = app.state.pageindex
     backend = _resolve_backend(req)
-    effective, detections, dense_text = _prepare(req)
+    effective, detections, dense_text, find_quote, rquery = _prepare(req)
     t0 = time.monotonic()
     try:
-        results = _retrieve(retriever, pageindex, req.query, req.find_quote,
+        results = _retrieve(retriever, pageindex, rquery, find_quote,
                             req.scope, backend, effective, req.top_k, dense_text,
                             include_catalog=req.include_catalog)
     except requests.RequestException as e:
@@ -400,7 +414,8 @@ def search(req: SearchRequest) -> dict[str, Any]:
     retrieval_ms = round((time.monotonic() - t0) * 1000.0, 1)
     return {
         "query": req.query,
-        "find_quote": req.find_quote,
+        "find_quote": find_quote,
+        "auto_quote": find_quote and not req.find_quote,
         "scope": req.scope,
         "backend": backend,
         "retrieval_ms": retrieval_ms,
@@ -436,10 +451,10 @@ def query(req: QueryRequest):
     override_provider, override_model = _resolve_model_choice(req)
 
     backend = _resolve_backend(req)
-    effective, detections, dense_text = _prepare(req)
+    effective, detections, dense_text, find_quote, rquery = _prepare(req)
     t0 = time.monotonic()
     try:
-        results = _retrieve(retriever, pageindex, req.query, req.find_quote,
+        results = _retrieve(retriever, pageindex, rquery, find_quote,
                             req.scope, backend, effective, req.top_k, dense_text,
                             include_catalog=req.include_catalog)
     except requests.RequestException as e:
@@ -463,7 +478,8 @@ def query(req: QueryRequest):
                                 detail=f"answer model error: {e}")
         return {
             "query": req.query,
-            "find_quote": req.find_quote,
+            "find_quote": find_quote,
+            "auto_quote": find_quote and not req.find_quote,
             "scope": req.scope,
             "backend": backend,
             "retrieval_ms": retrieval_ms,
@@ -479,7 +495,8 @@ def query(req: QueryRequest):
     def event_stream():
         yield _sse("meta", {
             "query": req.query,
-            "find_quote": req.find_quote,
+            "find_quote": find_quote,
+            "auto_quote": find_quote and not req.find_quote,
             "scope": req.scope,
             "backend": backend,
             "retrieval_ms": retrieval_ms,

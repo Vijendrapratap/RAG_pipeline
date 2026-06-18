@@ -4,7 +4,12 @@ All pure: no Postgres / Qdrant / Ollama needed.
 """
 from __future__ import annotations
 
-from rag_api.query_parse import detect_signals, merge_filters, signals_to_filters
+from rag_api.query_parse import (
+    detect_quote,
+    detect_signals,
+    merge_filters,
+    signals_to_filters,
+)
 
 # Shape matches rag_api.db.get_filter_options output.
 _VOCAB = {
@@ -156,3 +161,62 @@ def test_merge_drops_none_valued_explicit_keys():
 
 def test_merge_handles_none_inputs():
     assert merge_filters(None, None) == {}
+
+
+# ---- detect_quote --------------------------------------------------------
+
+# A long Devanagari verbatim passage (the kind a user pastes to locate a line).
+_LONG_QUOTE = (
+    "कोई कहने लगा थोड़े दिन की बात है तो उसने कहा थोड़े दिन की बात है हाँ तो ये लो "
+    "पहन लिया ये लो ड्रेस में चले गए अब तो छोड़ी बात नहीं है ना"
+)
+
+
+def test_detect_quote_strips_trailing_romanized_question():
+    q = _LONG_QUOTE + " ye kab kaha and kya bola gaya tha"
+    det = detect_quote(q)
+    assert det.is_quote is True
+    assert det.stripped_tail == "ye kab kaha and kya bola gaya tha"
+    assert det.query == _LONG_QUOTE
+    assert "kab" not in det.query  # the romanized tail is gone
+
+
+def test_detect_quote_long_devanagari_without_tail():
+    det = detect_quote(_LONG_QUOTE)
+    assert det.is_quote is True
+    assert det.query == _LONG_QUOTE
+    assert det.stripped_tail == ""
+
+
+def test_detect_quote_short_hindi_question_is_not_a_quote():
+    det = detect_quote("प्रवचन कब हुआ")
+    assert det.is_quote is False
+    assert det.query == "प्रवचन कब हुआ"  # unchanged, not stripped
+
+
+def test_detect_quote_english_query_is_not_a_quote():
+    det = detect_quote("Top discourses on dharma from 2015")
+    assert det.is_quote is False
+    assert det.query == "Top discourses on dharma from 2015"
+
+
+def test_detect_quote_short_quote_with_tail_qualifies():
+    # 8+ Devanagari words + a romanized tail is enough (high-confidence signal).
+    q = "ये लो पहन लिया ये लो ड्रेस में चले गए कहाँ kahan bola gaya"
+    det = detect_quote(q)
+    assert det.is_quote is True
+    assert det.stripped_tail == "kahan bola gaya"
+
+
+def test_detect_quote_empty_query():
+    det = detect_quote("")
+    assert det.is_quote is False
+
+
+def test_detect_quote_does_not_strip_when_not_a_quote():
+    # Mostly-Latin text with a couple of Devanagari words should not be treated
+    # as a verbatim quote, and must be returned unchanged.
+    q = "what does मोक्ष mean in this context"
+    det = detect_quote(q)
+    assert det.is_quote is False
+    assert det.query == q

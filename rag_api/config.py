@@ -103,7 +103,7 @@ class Settings(BaseModel):
     embed_model: str = os.environ.get("EMBED_MODEL", "bge-m3")
     # Answer-generation model. Kept configurable so swapping in the fine-tuned
     # 26B model later is a one-line .env change — no code edit.
-    chat_model: str = os.environ.get("CHAT_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+    chat_model: str = os.environ.get("CHAT_MODEL", "qwen3.5:9b")
     chat_num_ctx: int = int(os.environ.get("CHAT_NUM_CTX", "8192"))
     # Prompt-processing batch size (ollama `num_batch`). RAG prompts are large
     # (system prompt + retrieved passages near num_ctx), so prefill dominates
@@ -118,6 +118,14 @@ class Settings(BaseModel):
     # without truncating good answers or harming normal phrasing. Quality-safe.
     chat_repeat_penalty: float = float(
         os.environ.get("CHAT_REPEAT_PENALTY", "1.1")
+    )
+    # Before synthesis, drop passages scoring below this fraction of the top hit.
+    # On a precise hit (e.g. a located quote: top ~0.8, rest ~0.04) the tail is
+    # noise, and a smaller chat model otherwise refuses ("not found"). 0.2 keeps a
+    # located quote's single match while still keeping the cluster of relevant
+    # passages on a semantic query (top ~0.93 keeps everything >= ~0.19). 0 = off.
+    synthesis_min_score_ratio: float = float(
+        os.environ.get("SYNTH_MIN_SCORE_RATIO", "0.2")
     )
     # Answer generation can take a while — separate, longer timeout.
     chat_timeout_s: float = float(os.environ.get("CHAT_TIMEOUT_S", "300"))
@@ -189,7 +197,7 @@ class Settings(BaseModel):
     # Defaults to the chat model so a single local model serves both.
     pageindex_model: str = os.environ.get(
         "PAGEINDEX_MODEL",
-        os.environ.get("CHAT_MODEL", "qwen2.5:7b-instruct-q4_K_M"),
+        os.environ.get("CHAT_MODEL", "qwen3.5:9b"),
     )
     # Stage-1 fan-out: how many candidate documents (trees) the reasoning step
     # considers per query. Summary search picks them; falls back to on-disk

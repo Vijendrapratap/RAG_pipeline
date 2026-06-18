@@ -291,6 +291,75 @@ def mean_pool(vectors: list[list[float]]) -> list[float]:
     return [sum(v[i] for v in vectors) / n for i in range(dim)]
 
 
+def collect_sitting_bodies(
+    candidates: list[tuple[str, float, dict[str, Any]]],
+) -> dict[str, str]:
+    """Map ``sitting_key -> joined sitting_detail prose`` harvested from the
+    candidate pool.
+
+    A catalog ``track_title`` row stores only a metadata header + title, but the
+    actual discourse text lives in the ``sitting_detail`` rows of the same
+    sitting — which the catalog dense search usually surfaces alongside it. This
+    lets `rerank_text` score a title row against its real transcription with no
+    extra network round-trip.
+    """
+    bodies: dict[str, list[str]] = {}
+    for _cid, _score, pl in candidates:
+        if (pl.get("source_type") == "catalog"
+                and pl.get("doc_type") == "sitting_detail"):
+            sk = pl.get("sitting_key")
+            text = pl.get("text", "")
+            if sk and text:
+                bodies.setdefault(sk, []).append(text)
+    return {sk: "\n".join(parts) for sk, parts in bodies.items()}
+
+
+def rerank_text(
+    payload: dict[str, Any],
+    sitting_bodies: dict[str, str] | None = None,
+) -> str:
+    """Text handed to the cross-encoder for one candidate.
+
+    Transcript chunks and catalog ``sitting_detail`` rows already carry prose, so
+    their stored ``text`` is used verbatim. A catalog ``track_title`` row stores
+    only ``[Catalog | LOCATION | DATE | Performers: …]\\nTitle: …`` — bracketed
+    metadata the reranker cannot judge against a natural-language query (it rates
+    a genuinely relevant title near zero, which surfaces as a misleadingly tiny
+    score). For those rows we compose a natural-language sentence from the catalog
+    facets and, when the sitting's transcription is available in the candidate
+    pool, append it so the reranker scores against real content.
+
+    Display text is untouched — this only affects what the reranker *reads*.
+    """
+    text = payload.get("text", "")
+    if not (payload.get("source_type") == "catalog"
+            and payload.get("doc_type") == "track_title"):
+        return text
+
+    title = payload.get("track_title")
+    if not title:
+        return text  # no facets worth composing from
+
+    lead = f"{payload.get('track_type') or 'track'}: {title}"
+    ctx: list[str] = []
+    if payload.get("location"):
+        ctx.append(f"at {payload['location']}")
+    if payload.get("session_date"):
+        ctx.append(f"on {payload['session_date']}")
+    if payload.get("season"):
+        ctx.append(f"during {payload['season']} season")
+    performers = payload.get("performers") or []
+    if performers:
+        ctx.append("performed by " + ", ".join(performers[:8]))
+    sentence = lead + ((", " + " ".join(ctx)) if ctx else "")
+
+    if sitting_bodies:
+        body = sitting_bodies.get(payload.get("sitting_key") or "")
+        if body:
+            sentence = f"{sentence}. {body}"
+    return sentence
+
+
 # --------------------------------------------------------------------------
 # Retriever — holds clients and orchestrates the pipeline
 # --------------------------------------------------------------------------
@@ -463,7 +532,21 @@ class Retriever:
         reranker is unreachable — degraded results still beat no results."""
         if not candidates:
             return []
-        texts = [pl.get("text", "") for _, _, pl in candidates]
+        # Catalog title rows carry only metadata text; give the cross-encoder a
+        # composed sentence plus the sitting's actual transcription so it scores
+        # them on real content instead of rating relevant rows near zero. Bodies
+        # already in the pool are free; the rest are fetched in one batched call.
+        sitting_bodies = collect_sitting_bodies(candidates)
+        missing = sorted({
+            pl.get("sitting_key") for _c, _s, pl in candidates
+            if pl.get("source_type") == "catalog"
+            and pl.get("doc_type") == "track_title"
+            and pl.get("sitting_key")
+            and pl.get("sitting_key") not in sitting_bodies
+        })
+        if missing:
+            sitting_bodies = {**self._fetch_sitting_bodies(missing), **sitting_bodies}
+        texts = [rerank_text(pl, sitting_bodies) for _, _, pl in candidates]
         try:
             r = self._session.post(
                 self.settings.reranker_endpoint,
@@ -488,6 +571,48 @@ class Retriever:
             rescored.append((cid, score, pl))
         rescored.sort(key=lambda x: x[1], reverse=True)
         return rescored
+
+    def _fetch_sitting_bodies(self, sitting_keys: list[str]) -> dict[str, str]:
+        """Batch-fetch ``sitting_detail`` prose for the given sitting_keys from
+        the catalog collection, so metadata-only ``track_title`` candidates can be
+        reranked against their sitting's actual transcription.
+
+        One scroll for the whole set. Returns ``{}`` on any error / missing
+        collection — affected title rows then fall back to their composed text.
+        """
+        if not sitting_keys:
+            return {}
+        body = {
+            "limit": len(sitting_keys) * 8,
+            "with_payload": ["sitting_key", "text"],
+            "with_vector": False,
+            "filter": {"must": [
+                {"key": "doc_type", "match": {"value": "sitting_detail"}},
+                {"key": "sitting_key", "match": {"any": sitting_keys}},
+            ]},
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.settings.qdrant_key:
+            headers["api-key"] = self.settings.qdrant_key
+        try:
+            r = self._session.post(
+                f"{self.settings.qdrant_url}/collections/"
+                f"{self.settings.qdrant_catalog_collection}/points/scroll",
+                json=body, headers=headers, timeout=self.settings.http_timeout_s,
+            )
+            r.raise_for_status()
+            points = r.json().get("result", {}).get("points", [])
+        except requests.RequestException as e:
+            log.warning("sitting-body fetch failed (%s) — title rows use "
+                        "composed text", e)
+            return {}
+        bodies: dict[str, list[str]] = {}
+        for p in points:
+            pl = p.get("payload") or {}
+            sk, text = pl.get("sitting_key"), pl.get("text", "")
+            if sk and text:
+                bodies.setdefault(sk, []).append(text)
+        return {sk: "\n".join(parts) for sk, parts in bodies.items()}
 
     # ---- public API -----------------------------------------------------
 

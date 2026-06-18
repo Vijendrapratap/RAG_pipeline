@@ -8,7 +8,9 @@ from __future__ import annotations
 from rag_api.retrieval import (
     apply_post_filters,
     build_qdrant_filter,
+    collect_sitting_bodies,
     mean_pool,
+    rerank_text,
     rrf_fuse,
     summary_text_of,
     to_result,
@@ -242,3 +244,66 @@ def test_mean_pool_single_vector_is_identity():
 
 def test_mean_pool_empty_is_empty():
     assert mean_pool([]) == []
+
+
+# ---- rerank_text / collect_sitting_bodies --------------------------------
+
+_TITLE_PL = {
+    "source_type": "catalog",
+    "doc_type": "track_title",
+    "track_title": "सम्बोधन एवं प्रवचन",
+    "track_type": "bhajan",
+    "location": "DELHI",
+    "session_date": "2015-07-31",
+    "season": "monsoon",
+    "performers": ["Love", "Kush", "Manu"],
+    "sitting_key": "2015-07-31|8|",
+    "text": "[Catalog | DELHI | 2015-07-31 | Performers: Love, Kush, Manu] Title: सम्बोधन एवं प्रवचन",
+}
+
+
+def test_rerank_text_passthrough_for_transcript_chunk():
+    pl = {"text": "actual transcript prose", "source_type": "transcript"}
+    assert rerank_text(pl) == "actual transcript prose"
+
+
+def test_rerank_text_passthrough_for_sitting_detail():
+    pl = {"source_type": "catalog", "doc_type": "sitting_detail", "text": "[hdr]\nbody prose"}
+    assert rerank_text(pl) == "[hdr]\nbody prose"
+
+
+def test_rerank_text_composes_sentence_for_title_row():
+    out = rerank_text(_TITLE_PL)
+    # No longer the bare bracket metadata — a composed natural-language sentence.
+    assert not out.startswith("[Catalog")
+    assert "सम्बोधन एवं प्रवचन" in out
+    assert "bhajan:" in out
+    assert "at DELHI" in out and "on 2015-07-31" in out
+    assert "during monsoon season" in out
+    assert "performed by Love, Kush, Manu" in out
+
+
+def test_rerank_text_appends_sitting_body_when_available():
+    bodies = {"2015-07-31|8|": "the real discourse text about dharma"}
+    out = rerank_text(_TITLE_PL, bodies)
+    assert out.endswith("the real discourse text about dharma")
+    assert "सम्बोधन एवं प्रवचन" in out
+
+
+def test_rerank_text_title_row_without_title_falls_back_to_text():
+    pl = {"source_type": "catalog", "doc_type": "track_title", "text": "raw", "track_title": None}
+    assert rerank_text(pl) == "raw"
+
+
+def test_collect_sitting_bodies_harvests_only_detail_rows():
+    candidates = [
+        ("a", 0.1, _TITLE_PL),
+        ("b", 0.2, {"source_type": "catalog", "doc_type": "sitting_detail",
+                    "sitting_key": "2015-07-31|8|", "text": "body one"}),
+        ("c", 0.3, {"source_type": "catalog", "doc_type": "sitting_detail",
+                    "sitting_key": "2015-07-31|8|", "text": "body two"}),
+        ("d", 0.4, {"source_type": "transcript", "text": "ignored"}),
+    ]
+    bodies = collect_sitting_bodies(candidates)
+    assert set(bodies) == {"2015-07-31|8|"}
+    assert bodies["2015-07-31|8|"] == "body one\nbody two"

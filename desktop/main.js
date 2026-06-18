@@ -70,9 +70,29 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 4000) {
 
 // ── Docker ────────────────────────────────────────────────────────────────
 
+/**
+ * Run a shell command INSIDE the WSL distro that owns the data.
+ *
+ * This is the crux of the empty-mount fix. The override's bind mounts use
+ * absolute paths (/home/pc/transcript-rag-data/...) that resolve to the real
+ * data ONLY when `docker compose` runs from inside Ubuntu. Invoking `docker`
+ * from the Windows side — or letting Docker Desktop auto-start the stack —
+ * resolves those same paths inside Docker's own VM, where they are empty.
+ */
+function runWsl(shellCmd, opts = {}) {
+  return run("wsl", ["-d", cfg.wslDistro, "-e", "bash", "-lc", shellCmd], opts);
+}
+
+/** `docker compose <subcmd>` from inside the WSL project dir. */
+function composeWsl(subcmd) {
+  return runWsl(`cd '${cfg.wslProjectDir}' && docker compose ${subcmd}`);
+}
+
+/** Daemon AND WSL integration ready — checked from inside Ubuntu, the same
+ *  context compose will actually run in (so a half-up daemon doesn't pass). */
 async function dockerDaemonReady() {
   try {
-    await run("docker", ["info", "--format", "{{.ServerVersion}}"]);
+    await runWsl("docker info --format '{{.ServerVersion}}'");
     return true;
   } catch {
     return false;
@@ -87,16 +107,16 @@ function startDockerDesktop() {
   child.unref();
 }
 
-async function composeUp() {
-  await run("docker", ["compose", "up", "-d"], { cwd: cfg.projectDir });
+async function composeUp({ forceRecreate = false } = {}) {
+  await composeWsl(`up -d${forceRecreate ? " --force-recreate" : ""}`);
 }
 
 async function composeStop() {
-  await run("docker", ["compose", "stop"], { cwd: cfg.projectDir });
+  await composeWsl("stop");
 }
 
 async function composeRestart() {
-  await run("docker", ["compose", "restart"], { cwd: cfg.projectDir });
+  await composeWsl("restart");
 }
 
 // ── Health probing ──────────────────────────────────────────────────────────
@@ -109,6 +129,20 @@ async function probeHealth(base, timeoutMs = 3000) {
     return await r.json();
   } catch {
     return null;
+  }
+}
+
+/** Empty-mount detector. A correctly-mounted ollama reports its pulled
+ *  models; an empty bind mount (the Docker-Desktop auto-start failure mode)
+ *  reports zero. This is what separates "warm and real" from "came up blank". */
+async function ollamaHasModels() {
+  try {
+    const r = await fetchWithTimeout(`http://localhost:${cfg.ollamaPort}/api/tags`, {}, 4000);
+    if (!r.ok) return false;
+    const body = await r.json();
+    return Array.isArray(body.models) && body.models.length > 0;
+  } catch {
+    return false;
   }
 }
 
@@ -314,15 +348,15 @@ function startHealthPolling() {
 
 // ── Startup orchestration ─────────────────────────────────────────────────────
 
-async function bringStackUp() {
+async function bringStackUp({ forceRecreate = false } = {}) {
   setSplashStatus("Starting Docker…");
   if (!(await dockerDaemonReady())) {
     startDockerDesktop();
     await waitFor(dockerDaemonReady, cfg.dockerStartTimeout, 2500);
   }
 
-  setSplashStatus("Starting services…");
-  await composeUp();
+  setSplashStatus(forceRecreate ? "Repairing the archive…" : "Starting services…");
+  await composeUp({ forceRecreate });
 
   setSplashStatus("Waking the archive…");
   const base = await waitFor(async () => {
@@ -336,17 +370,20 @@ async function bringStackUp() {
 }
 
 async function boot() {
-  // Fast path: stack already warm → open immediately, no splash.
+  // Fast path: stack already warm AND mounted to the real data → open now.
   const existing = await resolveReachableBase(1200);
-  if (existing) {
+  if (existing && (await ollamaHasModels())) {
     createMainWindow(existing);
     return;
   }
 
-  // Cold path: show splash and bring everything up.
+  // Otherwise bring everything up from inside WSL. If something answered but
+  // ollama has no models, the stack came up on the empty Docker-Desktop
+  // mounts — force a recreate so the WSL-native bind mounts (the real data)
+  // take effect instead of silently showing a blank archive.
   createSplash();
   try {
-    const base = await bringStackUp();
+    const base = await bringStackUp({ forceRecreate: Boolean(existing) });
     createMainWindow(base);
   } catch (e) {
     const msg =

@@ -145,6 +145,32 @@ def build_user_prompt(query: str, context_block: str, answer_lang: str) -> str:
     )
 
 
+def trim_by_relevance(
+    results: list[dict[str, Any]], ratio: float,
+) -> list[dict[str, Any]]:
+    """Drop low-relevance passages before synthesis.
+
+    Retrieval returns a fixed top-k, but on a precise hit — e.g. a located quote —
+    the top passage dominates (score ~0.8) and the rest are noise (~0.04). A
+    smaller chat model, shown mostly-irrelevant passages, wrongly concludes the
+    answer is absent ("not found"); larger models tolerate the noise. Keeping only
+    passages scoring within `ratio` of the top hit removes the distractors so the
+    weak model answers correctly — and, because results are sorted by score
+    descending, the kept set is a prefix, so citation numbers still line up with
+    the full list shown in the UI.
+
+    `ratio <= 0` disables trimming. The top passage is always kept.
+    """
+    if ratio <= 0 or len(results) <= 1:
+        return results
+    top = float(results[0].get("score") or 0.0)
+    if top <= 0:
+        return results
+    cutoff = top * ratio
+    kept = [r for r in results if float(r.get("score") or 0.0) >= cutoff]
+    return kept or results[:1]
+
+
 def _strip_think_block(text: str) -> str:
     """Remove any complete <think>...</think> block from a full response.
 
@@ -329,6 +355,7 @@ class Synthesizer:
         """Non-streaming: return the full answer string."""
         if not results:
             return self._no_context(answer_lang)
+        results = trim_by_relevance(results, self.settings.synthesis_min_score_ratio)
         prov, mdl = self._resolve(provider, model)
         if prov == "openrouter":
             content = self._generate_openrouter(query, results, answer_lang, mdl)
@@ -396,6 +423,7 @@ class Synthesizer:
         if not results:
             yield self._no_context(answer_lang)
             return
+        results = trim_by_relevance(results, self.settings.synthesis_min_score_ratio)
         prov, mdl = self._resolve(provider, model)
         raw_stream = (
             self._stream_openrouter(query, results, answer_lang, mdl)

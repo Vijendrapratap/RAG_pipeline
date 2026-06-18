@@ -7,6 +7,7 @@ from rag_api.synthesis import (
     build_context_block,
     build_system_prompt,
     build_user_prompt,
+    trim_by_relevance,
 )
 
 SAMPLE = [
@@ -67,3 +68,42 @@ def test_no_context_messages_exist_for_both_languages():
     assert NO_CONTEXT_MESSAGE[LANG_ENGLISH].strip()
     # Hindi message must actually be in Devanagari.
     assert any("ऀ" <= c <= "ॿ" for c in NO_CONTEXT_MESSAGE[LANG_HINDI])
+
+
+# ---- trim_by_relevance ---------------------------------------------------
+
+def _r(score):
+    return {"chunk_id": "x", "score": score, "text": "t"}
+
+
+def test_trim_keeps_only_dominant_hit_on_a_located_quote():
+    # find_quote shape: one strong match, the rest noise.
+    results = [_r(0.80), _r(0.047), _r(0.044), _r(0.041)]
+    kept = trim_by_relevance(results, 0.2)
+    assert [r["score"] for r in kept] == [0.80]
+
+
+def test_trim_keeps_the_cluster_on_a_semantic_query():
+    # Several genuinely-relevant passages clustered near the top: keep them all.
+    results = [_r(0.93), _r(0.79), _r(0.78), _r(0.20)]
+    kept = trim_by_relevance(results, 0.2)
+    assert [r["score"] for r in kept] == [0.93, 0.79, 0.78, 0.20]
+
+
+def test_trim_is_a_prefix_so_citation_numbers_align():
+    results = [_r(0.5), _r(0.4), _r(0.01)]
+    kept = trim_by_relevance(results, 0.2)
+    assert kept == results[:2]  # contiguous prefix, order preserved
+
+
+def test_trim_disabled_when_ratio_zero():
+    results = [_r(0.8), _r(0.01)]
+    assert trim_by_relevance(results, 0.0) == results
+
+
+def test_trim_keeps_top_when_top_score_is_zero_or_missing():
+    assert trim_by_relevance([_r(0.0), _r(0.0)], 0.2) == [_r(0.0), _r(0.0)]
+
+
+def test_trim_single_result_unchanged():
+    assert trim_by_relevance([_r(0.8)], 0.2) == [_r(0.8)]
