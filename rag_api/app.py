@@ -27,14 +27,16 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlencode
 
 import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from rag_api import tracks
 from rag_api.analytics import Analytics
 from rag_api.config import Settings, get_settings
 from rag_api.corpus import CorpusReader
@@ -298,6 +300,11 @@ def health() -> dict[str, Any]:
         "chat_provider": synth.provider,
         "chat_model": synth.active_model,
         "embed_model": s.embed_model,
+        # Whether the two `:ro` media mounts actually landed. Docker silently
+        # creates an empty directory for a missing bind source, so the track
+        # panel degrades to "audio unavailable" instead of 404-ing every click.
+        "transcripts_mounted": tracks.tree_is_mounted(Path(s.transcripts_dir)),
+        "isolated_mounted": tracks.tree_is_mounted(Path(s.isolated_dir)),
     }
 
 
@@ -625,6 +632,87 @@ def corpus_state(
     """
     c: CorpusReader = app.state.corpus
     return _run_analytics("corpus_state", c.state, prefix, depth)
+
+
+# --------------------------------------------------------------------------
+# One track — its transcript, and its isolated vocals.
+#
+# Read-only, like the corpus map. Two `:ro` bind mounts are the entire new
+# surface. `file_meta` is the allowlist: a key that is not a row is a 404
+# before any path is built, so there is nothing to traverse.
+# --------------------------------------------------------------------------
+
+
+@app.get("/api/track/transcript", dependencies=[Depends(require_auth)])
+def track_transcript(source_file: str = Query(..., max_length=512)) -> dict[str, Any]:
+    """A track's segments, its cleaned text, and a ticketed URL for its audio."""
+    s: Settings = app.state.settings
+    c: CorpusReader = app.state.corpus
+
+    if not _run_analytics("track_lookup", c.has_track, source_file):
+        log.info("track not indexed: %r", source_file)
+        raise HTTPException(status_code=404, detail="no such track in the archive")
+
+    try:
+        raw_path = tracks.transcript_path(source_file, Path(s.transcripts_dir))
+    except ValueError as e:
+        # An indexed key that cannot be turned into a path means the ingest
+        # convention drifted. Loud: the parity test should have caught it first.
+        log.error("indexed key is not a usable path %r: %s", source_file, e)
+        raise HTTPException(status_code=404, detail="track has no readable transcript")
+
+    raw = tracks.read_json(raw_path)
+    if raw is None:
+        log.warning("transcript missing or unreadable on disk: %s", raw_path)
+        raise HTTPException(status_code=404, detail="transcript not on disk")
+
+    out = tracks.slim(raw)
+    out["source_file"] = source_file
+
+    cleaned = tracks.read_json(tracks.cleaned_path(source_file, Path(s.transcripts_dir)))
+    out["cleaned_text"] = (cleaned or {}).get("cleaned_text")
+    # Set when the Qwen polish was discarded (summarized, or a repetition loop).
+    out["clean_note"] = (cleaned or {}).get("clean_note")
+
+    wav = tracks.audio_path(raw.get("audio_file"), source_file, Path(s.isolated_dir))
+    if wav is None:
+        log.info("no isolated audio for %r", source_file)
+        out["audio_url"] = None
+    else:
+        q = urlencode({"source_file": source_file, "t": tracks.mint_ticket(source_file)})
+        out["audio_url"] = f"/api/track/audio?{q}"
+    return out
+
+
+@app.get("/api/track/audio")
+def track_audio(
+    source_file: str = Query(..., max_length=512),
+    # Defaulted, not required: an omitted ticket is an authorization failure, and
+    # should read as one. `Query(...)` would answer 422 with a validation schema.
+    t: str = Query("", max_length=128),
+) -> FileResponse:
+    """Stream the isolated vocals. Ticket-gated, because `<audio src>` cannot
+    send the `X-Dashboard-Password` header and the password must never ride in a
+    query string. The ticket was minted by `/api/track/transcript`, which is
+    header-authed and checks `file_meta` — so reaching here proves both, and no
+    second database round-trip is needed on each of the Range requests Chrome
+    fires while the user drags the scrubber.
+
+    `FileResponse` answers Range with a 206 on its own; there is nothing to add.
+    """
+    if not tracks.check_ticket(source_file, t):
+        log.info("rejected audio ticket for %r", source_file)
+        raise HTTPException(status_code=403, detail="expired or invalid audio ticket")
+
+    s: Settings = app.state.settings
+    raw = tracks.read_json(tracks.transcript_path(source_file, Path(s.transcripts_dir)))
+    wav = tracks.audio_path((raw or {}).get("audio_file"), source_file,
+                            Path(s.isolated_dir))
+    if wav is None:
+        log.warning("ticket valid but no isolated audio on disk for %r", source_file)
+        raise HTTPException(status_code=404, detail="isolated audio not on disk")
+
+    return FileResponse(wav, media_type="audio/wav", filename=wav.name)
 
 
 # --------------------------------------------------------------------------

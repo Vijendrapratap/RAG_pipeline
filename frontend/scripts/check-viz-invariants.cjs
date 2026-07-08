@@ -20,8 +20,10 @@
  */
 const assert = require("node:assert/strict");
 const { buildTree, radialTree, rootNode, applyAngles } = require("./.viz-build/viz/radialTree.js");
-const { relaxAngles, drift } = require("./.viz-build/viz/relax.js");
+const relax = require("./.viz-build/viz/relax.js");
+const { relaxAngles } = relax;
 const { SpatialGrid } = require("./.viz-build/viz/grid.js");
+const { parentPath, ancestors } = require("./.viz-build/corpus.js");
 
 let checks = 0;
 function check(name, fn) {
@@ -92,11 +94,25 @@ check("relaxAngles never moves a node radially", () => {
   }
 });
 
-check("drift never moves a node radially either", () => {
-  const placed = layout(corpus());
-  const before = placed.map((p) => p.dist);
-  for (let t = 0; t < 5; t += 0.5) drift(placed, t);
-  placed.forEach((p, i) => assert.equal(p.dist, before[i], `node ${i} drifted radially`));
+check("nothing animates the layout — the map idles when nothing is happening", () => {
+  // `drift()` used to rotate every ring every frame, which forced a full redraw
+  // and a spatial-grid rebuild 60×/s forever, and told the operator the archive
+  // was busy when it was asleep. Stillness is information; this keeps it.
+  assert.equal(relax.drift, undefined, "relax.ts exports drift() again");
+  assert.deepEqual(Object.keys(relax).sort(), ["relaxAngles"]);
+});
+
+check("a path's ancestors are its real prefixes, split only on the separator", () => {
+  // `Live Masters 2010` is a prefix of `Live Masters 2010 B` as a *string*.
+  // Focus dimming and subtree pruning both key on paths, so a naive
+  // startsWith(focus) lights up a sibling collection and nobody notices.
+  assert.equal(parentPath("a/b/c"), "a/b");
+  assert.equal(parentPath("a"), "");
+  assert.deepEqual(ancestors("Dagshai 2002/03 MAR/CAMP/1 PM/x.json"),
+    ["Dagshai 2002", "Dagshai 2002/03 MAR", "Dagshai 2002/03 MAR/CAMP",
+     "Dagshai 2002/03 MAR/CAMP/1 PM"]);
+  assert.deepEqual(ancestors("x.json"), []);
+  assert.ok(!"Live Masters 2010 B".startsWith("Live Masters 2010" + "/"));
 });
 
 check("a ring is wide enough to seat its own dots", () => {

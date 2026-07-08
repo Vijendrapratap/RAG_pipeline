@@ -36,6 +36,9 @@ export interface DrawState {
   selected: Placed | null;
   /** Paths whose children are currently expanded — drawn with a ring. */
   expanded: Set<string>;
+  /** The opened cluster. Its subtree and its ancestry stay lit; the rest fades
+   *  back, so "where am I" is answerable without reading a single label. */
+  focus: string | null;
   dark: boolean;
 }
 
@@ -96,20 +99,45 @@ function neighbourhood(hover: Placed | null, placed: Placed[]): Set<Placed> | nu
   return keep;
 }
 
+/**
+ * The set to keep bright while a cluster is open: everything inside it, plus
+ * the spine of ancestors back to the centre.
+ *
+ * Matched on the path string with a trailing separator, never `startsWith(focus)`
+ * alone — the archive really does contain `Dagshai 2001` and `Dagshai 2001` is a
+ * prefix of nothing else here, but `Live Masters 2010` and `Live Masters 2010 B`
+ * are one rename apart, and the bug would be invisible.
+ */
+function subtree(focus: string | null, placed: Placed[]): Set<Placed> | null {
+  if (!focus) return null;
+  const prefix = focus + "/";
+  const keep = new Set<Placed>();
+  for (const p of placed) {
+    const path = p.node.path;
+    if (p.node.depth === 0 || path === focus || path.startsWith(prefix) ||
+        focus.startsWith(path + "/")) {
+      keep.add(p);
+    }
+  }
+  return keep;
+}
+
 function isVisible(p: Placed, v: Viewport, margin: number): boolean {
   const s = toScreen(p, v);
   return s.x > -margin && s.x < v.width + margin && s.y > -margin && s.y < v.height + margin;
 }
 
 export function draw(ctx: CanvasRenderingContext2D, st: DrawState, dpr: number): void {
-  const { placed, view, hover, selected, expanded, dark } = st;
+  const { placed, view, hover, selected, expanded, focus, dark } = st;
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, view.width, view.height);
   ctx.fillStyle = dark ? "#12100c" : "#f5eee2";
   ctx.fillRect(0, 0, view.width, view.height);
 
-  const keep = neighbourhood(hover, placed);
+  // Hover wins over focus: while the pointer is on a dot, the question being
+  // asked is "what is this and what is it attached to", not "where am I".
+  const keep = neighbourhood(hover, placed) ?? subtree(focus, placed);
   const dimmed = (p: Placed): boolean => !!keep && !keep.has(p);
   const visible = placed.filter((p) => isVisible(p, view, 64));
 
@@ -143,15 +171,17 @@ export function draw(ctx: CanvasRenderingContext2D, st: DrawState, dpr: number):
   // delete exactly the picture we came for.
   for (const p of visible) {
     if (dimmed(p)) continue;
-    const focus = p === hover || p === selected;
+    // `emphasised`, not `focus`: `focus` is now the opened cluster's path, and a
+    // shadowed name here would be correct only by accident.
+    const emphasised = p === hover || p === selected;
     const rr = Math.max(p.r * view.scale, 0.6);
-    const size = rr * (focus ? 7 : 4.6);
-    if (size < 2.5 && !focus) continue;
+    const size = rr * (emphasised ? 7 : 4.6);
+    if (size < 2.5 && !emphasised) continue;
 
     const state = p.node.depth === 0 ? "remembered" : nodeState(p.node);
     const sprite = glowSprite(STATE_COLOR[state as CState]);
     const s = toScreen(p, view);
-    ctx.globalAlpha = focus ? 1 : 0.25 + litRatio(p.node) * 0.55;
+    ctx.globalAlpha = emphasised ? 1 : 0.25 + litRatio(p.node) * 0.55;
     ctx.drawImage(sprite, s.x - size / 2, s.y - size / 2, size, size);
   }
   ctx.globalAlpha = 1;

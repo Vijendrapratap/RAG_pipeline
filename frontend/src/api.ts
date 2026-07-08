@@ -7,7 +7,7 @@
  * SSE stream is consumed via `fetch` + ReadableStream, not `EventSource`
  * (EventSource cannot set request headers).
  */
-import type { CorpusStateResponse, CorpusSummary } from "./corpus";
+import type { CorpusStateResponse, CorpusSummary, TrackTranscript } from "./corpus";
 import type {
   ConversationListResponse,
   ConversationRecord,
@@ -154,6 +154,22 @@ export function getCorpusSummary(): Promise<CorpusSummary> {
 export function getCorpusState(prefix = "", depth = 1): Promise<CorpusStateResponse> {
   const qs = new URLSearchParams({ prefix, depth: String(depth) });
   return getJson<CorpusStateResponse>(`/api/corpus/state?${qs}`, true);
+}
+
+// ---- /api/track ----------------------------------------------------------
+
+/**
+ * One recording's transcript, plus a ticketed URL for its isolated audio.
+ *
+ * `audio_url` already carries a short-lived HMAC ticket: an `<audio src>`
+ * element sends no custom headers, so it cannot authenticate the way every
+ * other call in this file does, and the password must never ride in a query
+ * string. Hand the URL to the element verbatim. It expires in five minutes,
+ * which is fine — the browser holds the connection it already opened.
+ */
+export function getTrackTranscript(sourceFile: string): Promise<TrackTranscript> {
+  const qs = new URLSearchParams({ source_file: sourceFile });
+  return getJson<TrackTranscript>(`/api/track/transcript?${qs}`, true);
 }
 
 // ---- /api/history --------------------------------------------------------

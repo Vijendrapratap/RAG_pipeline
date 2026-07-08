@@ -182,6 +182,20 @@ class Settings(BaseModel):
     # --- Tantivy — opened in-process (read-only), not the HTTP sidecar ---
     tantivy_dir: str = os.environ.get("TANTIVY_DIR", "./data/tantivy")
 
+    # --- Media roots for the archive map's track panel (both mounted :ro) ---
+    # Container mount points; the host paths behind them are TRANSCRIPTS_DIR /
+    # ISOLATED_DIR in `.env`. Absent bind source => Docker makes an empty dir,
+    # so /api/health probes for content rather than existence.
+    #
+    # ISOLATED_DIR must point at `GuruAudio/Output` — the folder holding the
+    # per-model `.ckpt` trees, NOT one of them. Three tracks were transcribed
+    # from the second model's tree, and rooting at a single model makes their
+    # audio unreachable while the files sit right there.
+    transcripts_dir: str = os.environ.get(
+        "RAG_TRANSCRIPTS_MOUNT", "/app/data/transcripts"
+    )
+    isolated_dir: str = os.environ.get("RAG_ISOLATED_MOUNT", "/app/data/isolated")
+
     # --- PageIndex (alternate, opt-in retrieval backend for A/B comparison) ---
     # Reasoning-based "vectorless" retrieval: per-document LLM-built section
     # trees navigated by LLM reasoning instead of dense+BM25 fusion. This is an

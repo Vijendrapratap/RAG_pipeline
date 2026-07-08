@@ -42,6 +42,27 @@ export interface CorpusStateResponse {
   children: CorpusNode[];
 }
 
+/** One transcript segment. `start`/`end` are seconds into the isolated audio. */
+export interface TrackSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** Mirrors `GET /api/track/transcript`. */
+export interface TrackTranscript {
+  source_file: string;
+  duration: number | null;
+  language: string | null;
+  model: string | null;
+  segments: TrackSegment[];
+  cleaned_text: string | null;
+  /** Set when the Qwen polish was discarded (summarized, or a repetition loop). */
+  clean_note: string | null;
+  /** null when no isolated WAV is on disk. Already carries its access ticket. */
+  audio_url: string | null;
+}
+
 export interface CorpusSummary {
   version: string;
   n_files: number;
@@ -111,14 +132,29 @@ export function formatCount(n: number): string {
 }
 
 /**
- * Whether opening this node would reveal anything.
+ * Whether this node's children still need fetching.
  *
- * A collection's children are already on screen — they came down with the
- * skeleton. Offering "Open this cluster" on one spends a request and changes
- * nothing the operator can see, which reads as a broken button.
+ * A collection's children came down with the skeleton, so opening one costs a
+ * request and reveals nothing new. Note this is *only* about the network — it
+ * used to double as "can this node be opened at all", which is why clicking
+ * `Dagshai 2001` did nothing whatsoever: depth 1 < SKELETON_DEPTH, so the
+ * handler bailed before it ever moved the camera. Opening is `focusNode`;
+ * fetching is this. They are different questions.
  */
-export function canExpand(n: CorpusNode): boolean {
+export function hasHiddenChildren(n: CorpusNode): boolean {
   return !n.is_leaf && n.depth >= SKELETON_DEPTH;
+}
+
+/** The parent path of a node, or "" at the archive root. */
+export function parentPath(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i < 0 ? "" : path.slice(0, i);
+}
+
+/** Ancestor paths, outermost first: "a/b/c" -> ["a", "a/b"]. */
+export function ancestors(path: string): string[] {
+  const parts = path.split("/");
+  return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
 }
 
 /** The level a node sits at, named the way an archivist would name it.

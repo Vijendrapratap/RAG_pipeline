@@ -1246,13 +1246,83 @@ already present.
 
 **Commit:** `feat: read-only archive map (Phase 16, slice 1)`
 
+---
+
+### Phase 16 — slice 1b: navigation, stillness, and the recording itself
+
+Still read-only. Still a plain browser. The one new capability is *reading two
+files the archive already points at*.
+
+**Objective.** Make the map navigable, make it stop moving, and let a click on a
+recording play its isolated vocals beside its transcript.
+
+**Locked decisions**
+
+| Decision | Why |
+|---|---|
+| Clicking a folder flies the camera into it | Clicking `Dagshai 2001` did nothing at all: `canExpand()` gated on *"are the children un-fetched"* (`depth >= 3`) and was also being used to answer *"can this be opened"*. Two questions, one predicate. |
+| The map is **still** when nothing is happening | `drift()` rotated every ring every frame, forcing a redraw and a grid rebuild 60×/s forever. It told the operator the archive was busy while it slept. Stillness is information. |
+| `file_meta` **is** the allowlist | `/api/track/*` resolves a path only after the key matches a row. You cannot name a file that is not a row, so traversal is structurally impossible, not filtered. |
+| Audio is ticket-gated, not header-gated | `<audio src>` sends no custom headers, and the dashboard password must never ride in a query string. A 5-minute HMAC ticket, bound to one `source_file`, keyed by a per-process random secret. |
+| `ISOLATED_DIR` = `GuruAudio/Output`, not a `.ckpt` folder | **Measured:** the 3 tracks `transcribe_local.py` handled were isolated by the *second* model. Rooted at one model's folder, their audio is unreachable while the files sit right there. |
+| The WAV path is **read**, not guessed | Each `raw.json` records `audio_file` — the path the transcriber actually opened. |
+
+**Deliverables**
+
+- `rag_api/tracks.py` — path inverse, HMAC ticket, `slim()` (118 KB → ~20 KB by
+  dropping the per-word timings; they stay on disk).
+- `GET /api/track/transcript` (auth) and `GET /api/track/audio` (ticket), both
+  declared **above** the `app.mount("/", StaticFiles(...))`.
+- `GET /api/health` gains `transcripts_mounted` / `isolated_mounted`. Docker
+  silently creates an empty directory for a missing bind source; existence
+  proves nothing, so health probes for *content*.
+- Two `:ro` bind mounts, in `docker-compose.yml` **and** repeated inside the
+  override's `volumes: !override` block, which replaces the base list wholesale.
+- `frontend/src/components/TrackPanel.tsx`, breadcrumb trail, `Esc` to go up.
+- `viz/relax.ts` loses `drift()`; `viz/draw.ts` gains focus-subtree dimming.
+
+**Acceptance criteria** — all run and shown
+
+- `GET /api/health` → `transcripts_mounted: true`, `isolated_mounted: true`, and
+  `docker exec rag-api ls /app/data/isolated` lists **both** `.ckpt` trees.
+- Transcript for `…/02 OM GURUVE NAMAH.json` → `duration 1064.802`, 41 segments,
+  8,359 chars of cleaned text, an `audio_url`.
+- No password → **401**. `source_file=../../../etc/passwd` → **404**.
+- Audio: no ticket → **403**; a ticket minted for a *different* track → **403**;
+  a forged signature → **403**.
+- Audio with a valid ticket: `206 Partial Content`,
+  `content-range: bytes 0-1023/375663274`, `content-type: audio/wav`. Seeking
+  200 MB in → 206. Header reads `PCM / 2ch / 44100 Hz / 32-bit`.
+  Throughput **90 MB/s** against the 353 KB/s playback needs.
+- A degenerate track (isolated by the second model) serves audio: **206**.
+- `pytest tests/unit -q` → **430 passed**, including a parity test that walks the
+  real tree and asserts `transcript_path(qualified_source(p)) == p` for all
+  **9,335** keys, and a second that resolves every one of their `audio_file`s.
+  No sampling.
+- `npm run check:viz` → 12 invariant checks, including *"relaxation never moves a
+  node radially"* and *"relax.ts exports no `drift`"*.
+- `dependencies` is still exactly `react, react-dom`.
+
+**Not verifiable without a browser, and therefore not claimed:** the isolated
+WAVs are **32-bit integer PCM**. Chromium decodes `pcm_s32le`; Firefox's WAV
+decoder handles 8/16/24-bit int and 32-bit float and gives up here. Electron is
+Chromium, so the desktop app is safe; a Firefox tab may show a dead player. The
+panel says so rather than failing silently.
+
+**Commit:** `feat: drill-in navigation, a still map, and the recording itself (Phase 16, slice 1b)`
+
 **Later slices, gated and not opened here:** filesystem overlay (the real five
 states, via the desktop app — the only process that can see `D:\Audio Data`);
 running a pipeline stage from the console (Electron main owns spawning, because
 `scripts/add_transcripts.sh:49` runs `docker compose restart rag-api` and would
-kill any progress stream served by `rag-api` itself); and a performer web, which
-is **blocked on measurement** — `catalog_track.matched_source_file` is populated
-for 0 of 22,501 rows, so those edges would connect nothing to nothing.
+kill any progress stream served by `rag-api` itself). When that lands, the picker
+chooses **what to process, never where it lands** — `qualified_source` keys off
+`base_dir` and `output_wav_path_for` keys off `input_root`, so a new output root
+re-keys the whole archive and duplicates the index rather than growing it.
+`add_transcripts.sh` already exists to prevent exactly that by hand, and already
+takes a narrower folder as `$1`. The performer web stays **blocked on
+measurement** — `catalog_track.matched_source_file` is populated for 0 of 22,501
+rows, so those edges would connect nothing to nothing.
 
 ---
 

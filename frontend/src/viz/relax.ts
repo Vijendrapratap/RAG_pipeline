@@ -88,20 +88,16 @@ export function relaxAngles(placed: Placed[], opts: RelaxOptions = {}): void {
   applyAngles(placed);
 }
 
-/**
- * A slow, endless drift. Each ring rotates at its own rate, so the picture is
- * never quite still and never appears to spin as a rigid disc.
- *
- * `dt` is seconds. This is decoration and it is honest about that: it conveys
- * no data, so `prefers-reduced-motion` may switch it off with nothing lost.
- * Nothing else in this view moves unless a measurement moved.
- */
-export function drift(placed: Placed[], t: number): void {
-  for (const p of placed) {
-    if (p.dist === 0) continue;
-    const rate = 0.0055 / Math.sqrt(p.dist / 100);
-    const phase = Math.sin(t * rate * 6 + p.dist * 0.01) * 0.0016;
-    p.angle += phase;
-  }
-  applyAngles(placed);
-}
+// There was a `drift()` here: a slow per-ring rotation, running every frame.
+// It was decoration, and it cost more than it looked like it did — it forced a
+// full canvas redraw and a spatial-grid rebuild on all 1,947 nodes 60 times a
+// second, forever, so the `dirtyRef` check in BrainView could never short-
+// circuit and the map never idled.
+//
+// It also contradicted the one thing this view is supposed to say: **stillness
+// is information**. A glance should tell you whether anything is happening. A
+// map that is always moving cannot answer that, and a permanently-spinning disc
+// invites the reading that the archive is doing something. It isn't.
+//
+// The only motion left is the camera easing toward a cluster you clicked, which
+// is a response to an action, and which stops.

@@ -1427,24 +1427,183 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
   letter-spacing: 0.04em;
 }
 
-.brain-expand-btn {
-  margin-top: 18px;
+/* ── Breadcrumb trail over the canvas: where you are, and the way back ──── */
+
+.brain-trail {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  pointer-events: none; /* the canvas keeps the gaps; only the crumbs take clicks */
+}
+.brain-trail button {
+  pointer-events: auto;
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: rgba(18, 16, 12, 0.72);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: color var(--motion-fast), border-color var(--motion-fast);
+}
+.brain-trail button:hover:not(:disabled) {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+/* The last crumb is where you already are: shown, not offered. */
+.brain-trail button:disabled { color: var(--text-strong); cursor: default; }
+.brain-trail button:not(:last-of-type)::after {
+  content: " ›";
+  color: var(--muted);
+  opacity: 0.6;
+}
+.brain-trail-esc {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+/* ── The recordings inside an open sitting ──────────────────────────────── */
+
+.brain-child-list {
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.brain-child-list button {
   width: 100%;
-  padding: 10px 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--surface);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
   color: var(--text);
   font: inherit;
-  font-size: 0.86rem;
+  font-size: 0.84rem;
+  text-align: left;
   cursor: pointer;
-  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+  transition: background-color var(--motion-fast), border-color var(--motion-fast);
 }
-.brain-expand-btn:hover:not(:disabled) {
-  border-color: var(--accent, #a8451e);
+.brain-child-list button:hover {
   background: var(--bg-deep);
+  border-color: var(--border-strong);
 }
-.brain-expand-btn:disabled { opacity: 0.55; cursor: default; }
+.brain-child-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.brain-child-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brain-child-meta {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── One recording: its isolated vocals, and what was said ──────────────── */
+
+.track-panel { margin-top: 18px; display: flex; flex-direction: column; min-height: 0; }
+.track-audio {
+  width: 100%;
+  height: 36px;
+  /* The native control skin is near-black chrome on a near-black panel. */
+  filter: invert(0.88) hue-rotate(180deg);
+}
+
+.track-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 14px 0 8px;
+}
+.track-tabs button {
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: color var(--motion-fast), background-color var(--motion-fast);
+}
+.track-tabs button:hover:not(:disabled) { color: var(--text-strong); }
+.track-tabs button.is-active {
+  color: var(--text-strong);
+  background: var(--bg-deep);
+  border-color: var(--border-strong);
+}
+.track-tabs button:disabled { opacity: 0.4; cursor: default; }
+.track-follow { margin-left: auto; color: var(--accent, #f0a35e) !important; }
+
+.track-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* Bounded, and scrolls on its own. A two-hour pravachan is a few thousand
+     lines; letting it grow the panel would strand the audio controls somewhere
+     far above the fold, which is where you need them. */
+  max-height: 44vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  /* Follow-the-audio scrolls via CSS, not scrollIntoView({behavior:"smooth"}),
+     so the prefers-reduced-motion block below actually switches it off. */
+  scroll-behavior: smooth;
+}
+.track-lines button {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  text-align: left;
+  cursor: pointer;
+}
+.track-lines button:hover { background: var(--bg-deep); }
+.track-lines li.is-active button {
+  background: rgba(240, 163, 94, 0.1);
+  box-shadow: inset 2px 0 0 #f0a35e;
+}
+.track-time {
+  flex: none;
+  width: 3.1em;
+  padding-top: 2px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+.track-text { flex: 1; min-width: 0; }
+
+.track-cleaned {
+  max-height: 44vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-size: 0.86rem;
+  line-height: 1.68;
+  color: var(--text);
+}
 
 /* ── The dead-letter tray, such as it is in slice 1 ─────────────────────── */
 

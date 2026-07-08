@@ -22,6 +22,26 @@ services:
       # Read-only for the same reason; without this mount the API sees an
       # empty dir and the pageindex backend returns no results.
       - ./data/pageindex:/app/data/pageindex:ro
+      # The archive map's track panel reads two trees that live outside the
+      # repo. Host paths come from `.env`; both are strictly read-only, and the
+      # API only ever opens a path derived from an existing `file_meta` row.
+      #
+      # Long syntax on purpose: a Windows source like `D:/x` would be split on
+      # its colon by the short `src:dst:mode` form. Prefer a path relative to
+      # this file (`../GuruAudio/Output`) over `/mnt/d/...` — see the tantivy
+      # note in docker-compose.override.yml for why the latter mounts empty.
+      #
+      # ISOLATED_DIR is `GuruAudio/Output`, the folder *holding* the per-model
+      # `.ckpt` trees, not one of them: three tracks were isolated by the second
+      # model and are unreachable from inside a single model's folder.
+      - type: bind
+        source: ${TRANSCRIPTS_DIR:-./data/empty}
+        target: /app/data/transcripts
+        read_only: true
+      - type: bind
+        source: ${ISOLATED_DIR:-./data/empty}
+        target: /app/data/isolated
+        read_only: true
     environment:
       # --- upstream services (docker DNS) ---
       OLLAMA_URL: "http://ollama:11434"

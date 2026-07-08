@@ -209,6 +209,19 @@ class CorpusReader:
         self._cached_version, self._cached_rows = version, rows
         return rows
 
+    def has_track(self, source_file: str) -> bool:
+        """Is this exact key an indexed track?
+
+        The allowlist for `/api/track/*`. A caller cannot name a file that is
+        not a row, so there is no path to traverse — the primary-key lookup is
+        the security boundary, not a filter on top of one. Parameterized, and
+        deliberately not served from `_rows()`'s cache: a track ingested since
+        the last poll must be playable immediately.
+        """
+        return bool(self._query(
+            "SELECT 1 FROM file_meta WHERE source_file = %s LIMIT 1", (source_file,)
+        ))
+
     def summary(self) -> dict[str, Any]:
         version, _, _, max_ingested = self._version()
         out = summarize(self._rows(version))

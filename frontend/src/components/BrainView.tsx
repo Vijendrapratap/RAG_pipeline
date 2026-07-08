@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, getCorpusState, getCorpusSummary } from "../api";
 import type { CState, CorpusNode, CorpusSummary } from "../corpus";
-import { SKELETON_DEPTH, canExpand } from "../corpus";
+import { SKELETON_DEPTH, hasHiddenChildren, parentPath } from "../corpus";
 import { SpatialGrid } from "../viz/grid";
 import type { Placed } from "../viz/radialTree";
 import { buildTree, radialTree, rootNode } from "../viz/radialTree";
-import { drift, relaxAngles } from "../viz/relax";
+import { relaxAngles } from "../viz/relax";
 import type { Viewport } from "../viz/draw";
 import { draw, toLayout } from "../viz/draw";
 import { BrainLegend } from "./BrainLegend";
@@ -19,8 +19,25 @@ const MAX_BACKOFF_MS = 60_000;
 const MIN_SCALE = 0.06;
 const MAX_SCALE = 4;
 
+/** How long the camera takes to reach a cluster you opened. */
+const CAM_MS = 420;
+/** Breathing room, in layout units, around a framed cluster. */
+const CAM_PAD = 90;
+
 interface Props {
   onAuthFail: () => void;
+}
+
+/** A camera flight in progress. `null` means the view is at rest. */
+interface CamFlight {
+  fx: number; fy: number; fs: number;
+  tx: number; ty: number; ts: number;
+  t0: number;
+  dur: number;
+}
+
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
 /** Counters the acceptance tests read. Never used by the UI itself. */
@@ -49,28 +66,46 @@ export function BrainView({ onAuthFail }: Props) {
   const [nodes, setNodes] = useState<Map<string, CorpusNode>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  /** The opened cluster. Drives the camera and the dimming; null = whole archive. */
+  const [focusPath, setFocusPath] = useState<string | null>(null);
   const [hoverPath, setHoverPath] = useState<string | null>(null);
   const [loadingPath, setLoadingPath] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
 
-  const reduceMotion = useMemo(
+  // Live, not latched at mount: the OS setting can be toggled while the tab is
+  // open, and the previous `useMemo(..., [])` would keep animating until remount.
+  const [reduceMotion, setReduceMotion] = useState(
     () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
-    [],
   );
+  useEffect(() => {
+    const mq = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    if (!mq) return;
+    const onChange = (e: MediaQueryListEvent) => setReduceMotion(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
-  // Mutable render state. Kept out of React: these change every frame, and a
-  // setState per frame would re-render the detail panel 60 times a second.
+  // Mutable render state. Kept out of React: these change every frame during a
+  // camera flight, and a setState per frame would re-render the detail panel 60
+  // times a second.
   const viewRef = useRef<Viewport>({ x: 0, y: 0, scale: 0.3, width: 1, height: 1 });
   const placedRef = useRef<Placed[]>([]);
   const gridRef = useRef(new SpatialGrid());
   const hoverRef = useRef<Placed | null>(null);
   const selectedRef = useRef<Placed | null>(null);
   const expandedRef = useRef(expanded);
+  const focusRef = useRef<string | null>(null);
   const dirtyRef = useRef(true);
   const framedRef = useRef(false);
-  /** Set when a cluster is opened, consumed by the next layout pass. */
-  const focusRef = useRef<string | null>(null);
+  const camRef = useRef<CamFlight | null>(null);
+  const reduceMotionRef = useRef(reduceMotion);
+  /** `${focusPath}|${childCount}` of the last flight. Stops the 10 s poll — which
+   *  hands back a fresh `nodes` Map every tick — from yanking the camera back. */
+  const framedForRef = useRef<string | null>(null);
+
+  useEffect(() => { reduceMotionRef.current = reduceMotion; }, [reduceMotion]);
+  useEffect(() => { focusRef.current = focusPath; }, [focusPath]);
 
   const onError = useCallback((e: unknown) => {
     if (e instanceof ApiError && e.status === 401) { onAuthFail(); return true; }
@@ -151,31 +186,29 @@ export function BrainView({ onAuthFail }: Props) {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [summary?.version, refetch, onError]);
 
-  const toggleExpand = useCallback(async (node: CorpusNode) => {
-    if (!canExpand(node)) return;
-    if (expanded.has(node.path)) {
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        next.delete(node.path);
-        return next;
-      });
-      // Drop the subtree we loaded for it, but keep the skeleton depth intact.
-      setNodes((prev) => {
-        const next = new Map(prev);
-        for (const key of next.keys()) {
-          if (key.startsWith(node.path + "/") && next.get(key)!.depth > SKELETON_DEPTH) {
-            next.delete(key);
-          }
-        }
-        return next;
-      });
-      return;
-    }
+  /**
+   * Open a node: select it, and — if it is a folder — fly the camera into it,
+   * fetching its children first when they are not already on the map.
+   *
+   * This used to be `toggleExpand`, gated on `canExpand(node)` (which really
+   * meant "are this node's children un-fetched?"). A collection's children come
+   * down with the skeleton, so clicking `Dagshai 2001` failed that gate and did
+   * *nothing at all* — not even move the view. Fetching and opening are separate
+   * questions, and only the first one has anything to do with depth.
+   */
+  const focusNode = useCallback(async (node: CorpusNode) => {
+    setSelectedPath(node.path);
+    // A recording is a destination, not a container: it opens the track panel,
+    // and pulling the camera off its siblings would only lose the reader's place.
+    if (node.is_leaf) return;
+
+    setFocusPath(node.path);
+    if (!hasHiddenChildren(node) || expandedRef.current.has(node.path)) return;
+
     setLoadingPath(node.path);
     try {
       perf().fetches++;
       const res = await getCorpusState(node.path, 1);
-      focusRef.current = node.path;
       mergeNodes(res.children);
       setExpanded((prev) => new Set(prev).add(node.path));
     } catch (e) {
@@ -183,7 +216,21 @@ export function BrainView({ onAuthFail }: Props) {
     } finally {
       setLoadingPath(null);
     }
-  }, [expanded, mergeNodes, onError]);
+  }, [mergeNodes, onError]);
+
+  /** Step out one level. The subtree stays loaded — re-entering is free. */
+  const focusUp = useCallback(() => {
+    setSelectedPath(null);
+    setFocusPath((prev) => (prev ? parentPath(prev) || null : null));
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") focusUp();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusUp]);
 
   // ---- layout -------------------------------------------------------------
 
@@ -195,47 +242,79 @@ export function BrainView({ onAuthFail }: Props) {
     const placed = radialTree(buildTree(root, [...nodes.values()]));
     relaxAngles(placed);
     placedRef.current = placed;
+    // The only rebuild there is. Nothing moves a node after this — the drift is
+    // gone, and the camera transforms at draw time, not in layout space.
     gridRef.current.rebuild(placed);
     selectedRef.current = placed.find((p) => p.node.path === selectedPath) ?? null;
 
     const v = viewRef.current;
-    const ready = v.width > 1 && v.height > 1;
-
     // Frame the whole archive on the first layout. Ring radii are derived from
     // how much each ring must hold, so the outermost radius is not knowable in
     // advance — a hardcoded starting zoom would land somewhere arbitrary.
-    // Re-framing on every layout would yank the view out from under the user.
-    if (!framedRef.current && ready) {
+    if (!framedRef.current && v.width > 1 && v.height > 1) {
       const extent = Math.max(64, ...placed.map((p) => p.dist + p.r));
       v.scale = clampScale(Math.min(v.width, v.height) / (extent * 2.16));
       v.x = 0;
       v.y = 0;
       framedRef.current = true;
-    }
-
-    // A freshly opened cluster puts its tracks on a new outermost ring, inside
-    // a wedge a fraction of a degree wide. At whole-archive zoom that is a few
-    // sub-pixel dots at the rim — the operator double-clicks and nothing
-    // visibly happens. So the view follows the thing they just opened.
-    const focus = focusRef.current;
-    if (focus && ready) {
-      focusRef.current = null;
-      const kids = placed.filter((p) => p.parent?.node.path === focus);
-      const parent = placed.find((p) => p.node.path === focus);
-      if (parent && kids.length > 0) {
-        const pts = [parent, ...kids];
-        const xs = pts.map((p) => p.x);
-        const ys = pts.map((p) => p.y);
-        const w = Math.max(...xs) - Math.min(...xs);
-        const h = Math.max(...ys) - Math.min(...ys);
-        const pad = 90;
-        v.x = (Math.min(...xs) + Math.max(...xs)) / 2;
-        v.y = (Math.min(...ys) + Math.max(...ys)) / 2;
-        v.scale = clampScale(Math.min(v.width / (w + pad), v.height / (h + pad)));
-      }
+      framedForRef.current = "null|0";
     }
     dirtyRef.current = true;
   }, [nodes, summary?.n_files, summary?.n_chunks, selectedPath]);
+
+  /** Where the camera should sit to show `path` and its children. */
+  const frameFor = useCallback((path: string | null): CamFlight | null => {
+    const v = viewRef.current;
+    const placed = placedRef.current;
+    if (v.width <= 1 || placed.length === 0) return null;
+
+    let pts: Placed[];
+    if (path === null) {
+      pts = placed;
+    } else {
+      const parent = placed.find((p) => p.node.path === path);
+      if (!parent) return null;
+      const kids = placed.filter((p) => p.parent?.node.path === path);
+      // A folder whose children have not arrived yet still frames — on itself,
+      // at a readable zoom. Otherwise the click reads as "nothing happened",
+      // which is precisely the bug being fixed.
+      pts = kids.length > 0 ? [parent, ...kids] : [parent];
+    }
+
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const w = maxX - minX + CAM_PAD;
+    const h = maxY - minY + CAM_PAD;
+
+    return {
+      fx: v.x, fy: v.y, fs: v.scale,
+      tx: (minX + maxX) / 2,
+      ty: (minY + maxY) / 2,
+      ts: clampScale(Math.min(v.width / w, v.height / h)),
+      t0: performance.now(),
+      dur: reduceMotionRef.current ? 0 : CAM_MS,
+    };
+  }, []);
+
+  // Retarget when the opened cluster changes, or when it gains children. Keyed
+  // on both so the 10 s poll — which replaces the `nodes` Map every tick even
+  // when nothing changed — cannot drag the camera out from under the reader.
+  useEffect(() => {
+    if (!framedRef.current) return;
+    const kidCount = focusPath === null
+      ? 0
+      : [...nodes.keys()].filter((k) => k.startsWith(focusPath + "/")).length;
+    const key = `${focusPath}|${kidCount}`;
+    if (framedForRef.current === key) return;
+
+    const flight = frameFor(focusPath);
+    if (!flight) return;
+    framedForRef.current = key;
+    camRef.current = flight;
+    dirtyRef.current = true;
+  }, [focusPath, nodes, frameFor]);
 
   // ---- render loop --------------------------------------------------------
 
@@ -248,7 +327,6 @@ export function BrainView({ onAuthFail }: Props) {
 
     let raf = 0;
     let dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const t0 = performance.now();
 
     const resize = () => {
       const r = wrap.getBoundingClientRect();
@@ -267,17 +345,27 @@ export function BrainView({ onAuthFail }: Props) {
 
     const frame = () => {
       raf = requestAnimationFrame(frame);
-      const visible = document.visibilityState === "visible";
+      if (document.visibilityState !== "visible") return;
 
-      // Motion is decoration, so it is the first thing sacrificed: reduced
-      // motion, or a hidden tab, and we redraw only when something changed.
-      const animating = visible && !reduceMotion && placedRef.current.length > 0;
-      if (animating) {
-        drift(placedRef.current, (performance.now() - t0) / 1000);
-        gridRef.current.rebuild(placedRef.current);
+      // The only thing that moves. When no cluster is being opened, `camRef` is
+      // null, nothing marks the canvas dirty, and this loop costs one branch per
+      // frame — the map is genuinely still. That stillness is the signal: a
+      // glance tells you whether anything is happening.
+      const cam = camRef.current;
+      if (cam) {
+        const k = cam.dur <= 0 ? 1 : Math.min(1, (performance.now() - cam.t0) / cam.dur);
+        const e = easeInOutCubic(k);
+        const v = viewRef.current;
+        v.x = cam.fx + (cam.tx - cam.fx) * e;
+        v.y = cam.fy + (cam.ty - cam.fy) * e;
+        // Scale interpolates geometrically. Lerping it makes a zoom-out appear to
+        // accelerate, because scale is a ratio and the eye reads its logarithm.
+        v.scale = cam.fs * Math.pow(cam.ts / cam.fs, e);
+        if (k >= 1) camRef.current = null;
         dirtyRef.current = true;
       }
-      if (!dirtyRef.current || !visible) return;
+
+      if (!dirtyRef.current) return;
       dirtyRef.current = false;
 
       const start = performance.now();
@@ -287,6 +375,7 @@ export function BrainView({ onAuthFail }: Props) {
         hover: hoverRef.current,
         selected: selectedRef.current,
         expanded: expandedRef.current,
+        focus: focusRef.current,
         dark: true,
       }, dpr);
 
@@ -298,7 +387,7 @@ export function BrainView({ onAuthFail }: Props) {
     raf = requestAnimationFrame(frame);
 
     return () => { cancelAnimationFrame(raf); ro.disconnect(); };
-  }, [reduceMotion]);
+  }, []);
 
   // ---- interaction --------------------------------------------------------
 
@@ -314,6 +403,8 @@ export function BrainView({ onAuthFail }: Props) {
   }, []);
 
   const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
+    // Any hand on the controls cancels the flight, or the camera fights the user.
+    camRef.current = null;
     const v = viewRef.current;
     const rect = e.currentTarget.getBoundingClientRect();
     const before = toLayout(e.clientX - rect.left, e.clientY - rect.top, v);
@@ -328,6 +419,7 @@ export function BrainView({ onAuthFail }: Props) {
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
+    camRef.current = null;
     dragRef.current = { x: e.clientX, y: e.clientY, moved: false };
   }, []);
 
@@ -349,20 +441,28 @@ export function BrainView({ onAuthFail }: Props) {
     const d = dragRef.current;
     dragRef.current = null;
     if (d?.moved) return; // a drag is not a click
+
     const hit = hoverRef.current;
     selectedRef.current = hit;
-    setSelectedPath(hit?.node.path ?? null);
     dirtyRef.current = true;
-  }, []);
-
-  const onDoubleClick = useCallback(() => {
-    const hit = hoverRef.current;
-    if (hit) void toggleExpand(hit.node);
-  }, [toggleExpand]);
+    if (!hit) {
+      // Empty space: drop the selection, keep the cluster open. Escape leaves it.
+      setSelectedPath(null);
+      return;
+    }
+    void focusNode(hit.node);
+  }, [focusNode]);
 
   // ---- render -------------------------------------------------------------
 
   const selected = selectedPath ? nodes.get(selectedPath) ?? null : null;
+  /** Direct children of the selected folder — the "2 recordings" list. */
+  const childNodes = selected && !selected.is_leaf
+    ? [...nodes.values()]
+        .filter((n) => n.path.startsWith(selected.path + "/")
+          && n.depth === selected.depth + 1)
+        .sort((a, b) => a.name.localeCompare(b.name))
+    : [];
   const counts: Record<CState, number> | null = summary
     ? { remembered: summary.n_remembered, written: summary.n_written, failed: summary.n_failed }
     : null;
@@ -389,7 +489,6 @@ export function BrainView({ onAuthFail }: Props) {
           onMouseDown={onMouseDown}
           onMouseUp={onMouseUp}
           onMouseLeave={() => { dragRef.current = null; hoverRef.current = null; setHoverPath(null); dirtyRef.current = true; }}
-          onDoubleClick={onDoubleClick}
           onWheel={onWheel}
           role="img"
           aria-label={
@@ -408,16 +507,41 @@ export function BrainView({ onAuthFail }: Props) {
             Reconnecting — showing the last picture we had
           </div>
         )}
-        {hoverPath && <div className="brain-hint">Click to inspect · Double-click to open</div>}
+
+        {/* Where you are, and the way back. Each crumb is a real ancestor path,
+            so clicking one flies straight there without unloading anything. */}
+        <nav className="brain-trail" aria-label="Archive location">
+          <button onClick={() => { setFocusPath(null); setSelectedPath(null); }}
+                  disabled={focusPath === null}>
+            Whole archive
+          </button>
+          {focusPath?.split("/").map((name, i, all) => {
+            const path = all.slice(0, i + 1).join("/");
+            return (
+              <button key={path} onClick={() => { setFocusPath(path); setSelectedPath(path); }}
+                      disabled={i === all.length - 1}>
+                {name}
+              </button>
+            );
+          })}
+          {focusPath && <span className="brain-trail-esc">Esc to go up</span>}
+        </nav>
+
+        {hoverPath && (
+          <div className="brain-hint">
+            Click to open · Scroll to zoom · Drag to move
+          </div>
+        )}
       </div>
 
       <div className="brain-side">
         <CorpusDetail
           node={selected}
           summary={summary}
-          expanded={selected ? expanded.has(selected.path) : false}
+          childNodes={childNodes}
           loading={!!selected && loadingPath === selected.path}
-          onToggleExpand={toggleExpand}
+          onOpen={focusNode}
+          onAuthFail={onAuthFail}
         />
         <BrainLegend counts={counts} />
       </div>
