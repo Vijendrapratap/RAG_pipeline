@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:viz": "tsc src/corpus.ts src/viz/radialTree.ts src/viz/relax.ts src/viz/grid.ts --outDir scripts/.viz-build --module commonjs --target es2020 --skipLibCheck && node -e \"require('fs').writeFileSync('scripts/.viz-build/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node scripts/check-viz-invariants.cjs",
+    "bench:viz": "tsc src/corpus.ts src/viz/radialTree.ts src/viz/relax.ts src/viz/grid.ts --outDir scripts/.viz-build --module commonjs --target es2020 --skipLibCheck && node -e \"require('fs').writeFileSync('scripts/.viz-build/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node scripts/bench-viz.cjs"
   },
   "dependencies": {
     "react": "^18.3.1",

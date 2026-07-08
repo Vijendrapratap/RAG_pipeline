@@ -1262,3 +1262,308 @@ input, select, textarea { font-family: inherit; font-size: inherit; color: inher
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Archive map — the corpus drawn as a radial hierarchy.
+
+   Dark is scoped to this view via [data-theme="dark"] on its own container,
+   not applied app-wide: the rest of the product is parchment and stays that
+   way. A glowing graph cannot live on #f5eee2, and re-theming 1,288 lines of
+   CSS is a separate, honest piece of work.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.brain-view[data-theme="dark"] {
+  --bg:            #12100c;
+  --bg-deep:       #0c0a07;
+  --surface:       #1a1712;
+  --surface-alt:   #16130f;
+  --border:        #2e2820;
+  --border-strong: #443c2f;
+  --text:          #f2e9d8;
+  --text-strong:   #fff7ea;
+  --muted:         #9a8f76;
+  --muted-strong:  #c0b499;
+  /* The brand tokens already read well on dark and carry the identity onto
+     the canvas, so --accent / --gold / --danger are inherited unchanged. */
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.brain-canvas-wrap {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.brain-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+.brain-canvas:active { cursor: grabbing; }
+
+.brain-loading,
+.brain-hint {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+.brain-loading { top: 50%; }
+.brain-hint    { bottom: 16px; }
+
+.brain-stale {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(26, 23, 18, 0.92);
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+}
+.brain-stale-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gold, #8a6a26);
+  animation: brain-pulse 1.6s ease-in-out infinite;
+}
+@keyframes brain-pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+
+/* ── Side panel ─────────────────────────────────────────────────────────── */
+
+.brain-side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+.brain-detail { padding: 26px 22px 20px; }
+
+.brain-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.brain-breadcrumb span:not(:last-child)::after { content: " ›"; }
+
+.brain-detail-kicker {
+  color: var(--accent, #a8451e);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.brain-detail-title {
+  margin: 6px 0 14px;
+  font-size: 1.32rem;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+.brain-detail-line { margin: 10px 0; font-size: 0.9rem; line-height: 1.55; }
+.brain-detail-line.muted { color: var(--muted); }
+.brain-detail-hint {
+  margin-top: 20px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.brain-state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 5px 12px 5px 9px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.78rem;
+}
+
+.brain-stats {
+  display: flex;
+  gap: 22px;
+  margin: 16px 0 4px;
+  flex-wrap: wrap;
+}
+.brain-stat-value {
+  font-size: 1.42rem;
+  font-weight: 600;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.brain-stat-label {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+.brain-expand-btn {
+  margin-top: 18px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.86rem;
+  cursor: pointer;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+.brain-expand-btn:hover:not(:disabled) {
+  border-color: var(--accent, #a8451e);
+  background: var(--bg-deep);
+}
+.brain-expand-btn:disabled { opacity: 0.55; cursor: default; }
+
+/* ── The dead-letter tray, such as it is in slice 1 ─────────────────────── */
+
+.brain-alert {
+  margin-top: 20px;
+  padding: 14px 15px;
+  border: 1px solid rgba(214, 69, 65, 0.4);
+  border-left: 3px solid #d64541;
+  border-radius: 8px;
+  background: rgba(214, 69, 65, 0.07);
+}
+.brain-alert-title {
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 0.88rem;
+  color: #f0938f;
+}
+.brain-alert p { margin: 0; font-size: 0.82rem; line-height: 1.5; color: var(--muted-strong); }
+.brain-alert-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.brain-alert-list code { overflow-wrap: anywhere; }
+
+/* ── Legend ─────────────────────────────────────────────────────────────── */
+
+.brain-legend {
+  margin-top: auto;
+  padding: 20px 22px 24px;
+  border-top: 1px solid var(--border);
+}
+.brain-legend-title {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.brain-legend-list { margin: 0; padding: 0; list-style: none; }
+.brain-legend-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.brain-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+}
+.brain-legend-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.brain-legend-count {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.brain-legend-meaning {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.brain-legend-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.brain-legend-note--caveat {
+  padding-top: 11px;
+  border-top: 1px dashed var(--border);
+  color: var(--muted-strong);
+}
+
+.brain-fatal {
+  margin: auto;
+  max-width: 32rem;
+  padding: 32px;
+  text-align: center;
+}
+.brain-fatal h2 { margin: 0 0 10px; font-size: 1.2rem; }
+.brain-fatal details { margin-top: 18px; color: var(--muted); font-size: 0.8rem; }
+.brain-fatal summary { cursor: pointer; }
+
+@media (max-width: 1000px) {
+  .brain-view[data-theme="dark"] { grid-template-columns: 1fr; grid-template-rows: 55% 45%; }
+  .brain-side { border-left: none; border-top: 1px solid var(--border); }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Reduced motion.
+
+   The app shipped seven @keyframes and zero of these queries. The archive map
+   adds continuous canvas drift, so this stops being a nicety. Honouring the
+   setting must leave the graph fully rendered and fully usable — just still.
+   The drift itself is switched off in BrainView (a CSS query cannot reach
+   into a canvas), which is why this block only has the DOM animations to do.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1154,6 +1154,108 @@ exits non-zero on failure, supports `--limit N`).
 
 ---
 
+### Phase 16 — The Archive Map (slice 1: read-only)
+
+**Objective:** Make the archive visible. Today there is no way to see what the
+corpus contains, no way to see which recordings the system can actually recall,
+and no way to notice when something is wrong. That cost real things: 5,420
+isolated files sat untranscribed for four days with nobody noticing, and three
+tracks are in Qdrant right now with corrupted identity keys that nothing
+surfaces.
+
+This slice draws every indexed recording as a point of light on a radial map of
+the archive's own folder hierarchy, colours it by what Postgres can prove about
+it, and refreshes itself while the pipeline runs.
+
+**Overrides PRD §15** ("a separate frontend is out of scope") for the same
+reason Phase E did: by opening a phase, not by ignoring the section. §15 remains
+correct about *unbounded* frontend work.
+
+**Locked design decisions:**
+
+| Decision | Choice |
+|---|---|
+| Data source | `file_meta.source_file` alone. It already *is* the hierarchy (`Collection/Group/Sitting/Track.json`). No new table, no new mount, no filesystem access. |
+| Layout | Radial hierarchy, relaxed on **angle only**. Radius encodes tree depth exactly. A force simulation is rejected: every edge here is containment, so it would simulate away a tree we already know and return a hairball. |
+| Ring radii | Sized by demand (`2πR ≥ Σ(2r + pad)`), not a fixed gap per level. Depth 3 holds 1,748 sittings; a fixed gap gives each 1.2 units of arc for a dot needing 7. |
+| Renderer | Canvas 2D. SVG's per-element DOM cost dominates above ~2,000 nodes. Glow is a pre-rendered sprite, never `ctx.shadowBlur`. |
+| Hover picking | Uniform spatial grid, `O(1)`. A quadtree is unnecessary at this density. |
+| Frontend deps | **Zero new ones.** `dependencies` stays exactly `react`, `react-dom`. |
+| Live refresh | Poll `/api/corpus/summary` every 10 s, only while the tab is visible. On a `version` change, refetch the skeleton plus open clusters — never the whole tree. |
+| Control plane | **None in this slice.** Read-only. Safe to build while the WhisperX and isolation runs are in flight. |
+| Phase 15 | **Stays closed.** The map needs no entity resolution; every edge it draws is containment. |
+| Dark theme | Scoped to `.brain-view[data-theme="dark"]`. The rest of the app stays parchment. App-wide dark mode is separate, honest work. |
+
+**Node states — exactly what Postgres can prove, and no more:**
+
+| State | Rule | Meaning shown to the operator |
+|---|---|---|
+| `remembered` | `chunk_count > 0 AND session_date IS NOT NULL` | Searchable, and we know the day it was recorded. |
+| `written` | `chunk_count > 0 AND session_date IS NULL` | Searchable — but no date could be read from its folder. |
+| `failed` | `source_file NOT LIKE '%/%'` | Indexed under a name with no place in the archive. |
+
+`tagged_at` is **zero for all 9,335 rows** (Phase 13 has never been run against
+this data), so it cannot carry a colour. The `dark` (never transcribed) and
+`heard` (isolated, not transcribed) states need the filesystem, which the
+`rag-api` container cannot see; they arrive with the desktop overlay. **The
+legend must say that this map shows only what has been indexed** — otherwise a
+nearly-full disc reads as a nearly-finished archive.
+
+**Deliverables:**
+
+`rag_api/corpus.py` — `CorpusReader` over `file_meta`, mirroring
+`rag_api/analytics.py`. `build_nodes()` and `summarize()` are pure functions over
+rows, so the tests need no database. `version_key()` hashes
+`(n_files, n_chunks, max_ingested_at)`.
+
+`rag_api/app.py` — `GET /api/corpus/summary` and `GET /api/corpus/state`, both
+`Depends(require_auth)`, both declared **above** the `app.mount("/", StaticFiles)`
+call that otherwise swallows every route after it.
+
+`frontend/src/viz/{radialTree,relax,grid,draw}.ts`, `frontend/src/corpus.ts`,
+`frontend/src/components/{BrainView,BrainLegend,CorpusDetail}.tsx`, additions to
+`api.ts` / `App.tsx` / `Sidebar.tsx`, and a scoped dark-token block plus the
+project's first `prefers-reduced-motion` query in `styles.css`.
+
+`frontend/scripts/check-viz-invariants.cjs` + `npm run check:viz` — invariant
+checks against the compiled layout modules. No test runner is added; `tsc` is
+already present.
+
+`tests/unit/test_rag_api_corpus.py`.
+
+**Acceptance criteria:**
+- `GET /api/corpus/summary` → `n_files == 9335`, `n_chunks == 24567`
+  (cross-checked against `ingest_status`, a different table), `n_failed == 3`,
+  and the three degenerate keys named.
+- Drilling `Dagshai 2002/` → `03 MAR - 2002/` → `DAGSHAI 26 - 29 MAR 2002 HOLI
+  CAMP/` → `26 MAR - 1$ - 7 PM/` reveals `02 OM GURUVE NAMAH.json` as a
+  `remembered` node with `n_chunks > 0` and a session date.
+- `curl localhost:8081/api/corpus/summary` with no password → **401**.
+- `npm run check:viz` green, including *relaxation never moves a node radially*
+  — if it could, a recording would drift into the ring where camps live and the
+  picture would start lying.
+- Frame budget under 16 ms at ≥ 1,900 visible nodes, measured via
+  `window.__brainPerf`, not eyeballed.
+- `frontend/package.json` `dependencies` contains **exactly** `react`,
+  `react-dom`.
+- `styles.css` contains a `prefers-reduced-motion` block, and honouring it stops
+  the drift while leaving the map fully rendered and usable.
+- Stopping `rag-api` mid-session: the map holds its last good picture, shows a
+  reconnecting indicator, and recovers. It does **not** flash empty.
+- `pytest tests/unit -q` all green.
+
+**Commit:** `feat: read-only archive map (Phase 16, slice 1)`
+
+**Later slices, gated and not opened here:** filesystem overlay (the real five
+states, via the desktop app — the only process that can see `D:\Audio Data`);
+running a pipeline stage from the console (Electron main owns spawning, because
+`scripts/add_transcripts.sh:49` runs `docker compose restart rag-api` and would
+kill any progress stream served by `rag-api` itself); and a performer web, which
+is **blocked on measurement** — `catalog_track.matched_source_file` is populated
+for 0 of 22,501 rows, so those edges would connect nothing to nothing.
+
+---
+
 ## 7. End-to-end deployment runbook (the happy path)
 
 After all phases complete, this is the sequence to actually deploy:

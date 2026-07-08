@@ -7,6 +7,7 @@
  * SSE stream is consumed via `fetch` + ReadableStream, not `EventSource`
  * (EventSource cannot set request headers).
  */
+import type { CorpusStateResponse, CorpusSummary } from "./corpus";
 import type {
   ConversationListResponse,
   ConversationRecord,
@@ -134,6 +135,25 @@ export function analyticsTranscripts(
 ): Promise<TranscriptsResponse> {
   const qs = new URLSearchParams({ term, limit: String(limit) });
   return getJson<TranscriptsResponse>(`/api/analytics/transcripts?${qs}`, true);
+}
+
+// ---- /api/corpus ---------------------------------------------------------
+
+/** Whole-archive totals. Cheap enough to poll; `version` is the refresh key. */
+export function getCorpusSummary(): Promise<CorpusSummary> {
+  return getJson<CorpusSummary>("/api/corpus/summary", true);
+}
+
+/**
+ * Nodes at most `depth` levels below `prefix`.
+ *
+ * `prefix` goes through URLSearchParams because real folder names contain `$`,
+ * `&`, `#` and spaces ("26 MAR - 1$ - 7 PM"). Hand-built query strings lose
+ * those silently and return the wrong subtree.
+ */
+export function getCorpusState(prefix = "", depth = 1): Promise<CorpusStateResponse> {
+  const qs = new URLSearchParams({ prefix, depth: String(depth) });
+  return getJson<CorpusStateResponse>(`/api/corpus/state?${qs}`, true);
 }
 
 // ---- /api/history --------------------------------------------------------

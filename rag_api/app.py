@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from rag_api.analytics import Analytics
 from rag_api.config import Settings, get_settings
+from rag_api.corpus import CorpusReader
 from rag_api.db import VocabCache
 from rag_api.history import History
 from rag_api.lang import resolve_language
@@ -159,6 +160,7 @@ async def lifespan(app: FastAPI):
     app.state.synthesizer = Synthesizer(settings)
     app.state.analytics = Analytics(settings.pg_dsn)
     app.state.history = History(settings.pg_dsn)
+    app.state.corpus = CorpusReader(settings.pg_dsn)
     app.state.vocab_cache = VocabCache()
     log.info(
         "rag_api up — collection=%s bm25=%s chat=%s/%s backend=%s "
@@ -589,6 +591,40 @@ def analytics_transcripts(
     """Transcript files ranked by how many `term`-matching chunks they hold."""
     a: Analytics = app.state.analytics
     return _run_analytics("transcripts", a.list_transcripts, term, limit)
+
+
+# --------------------------------------------------------------------------
+# Corpus map — the archive as a tree. Read-only; Postgres is the only source.
+#
+# Declared here, well above the `app.mount("/", StaticFiles(...))` at the foot
+# of this module: the mount matches every path after it, so a route registered
+# below it is unreachable.
+# --------------------------------------------------------------------------
+
+
+@app.get("/api/corpus/summary", dependencies=[Depends(require_auth)])
+def corpus_summary() -> dict[str, Any]:
+    """Whole-archive totals plus a `version` the map polls for live refresh.
+
+    `version` moves when (n_files, n_chunks, max_ingested_at) moves — so an
+    ingest that only *replaces* a file's chunks still registers.
+    """
+    c: CorpusReader = app.state.corpus
+    return _run_analytics("corpus_summary", c.summary)
+
+
+@app.get("/api/corpus/state", dependencies=[Depends(require_auth)])
+def corpus_state(
+    prefix: str = Query("", max_length=512),
+    depth: int = Query(1, ge=1, le=4),
+) -> dict[str, Any]:
+    """The nodes at most `depth` levels below `prefix` ("" is the archive root).
+
+    depth=3 from the root draws the container skeleton (collections, events,
+    sessions) in one request; depth=1 from a session reveals its tracks.
+    """
+    c: CorpusReader = app.state.corpus
+    return _run_analytics("corpus_state", c.state, prefix, depth)
 
 
 # --------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import { ApiError, deleteHistoryItem, listHistory } from "../api";
 import type { ConversationSummary, Health } from "../types";
 import { BrandMark } from "./BrandMark";
 
-type Tab = "search" | "analytics";
+type Tab = "search" | "analytics" | "archive";
 
 interface Props {
   health: Health | null;
@@ -69,6 +69,22 @@ function ChartIcon() {
       <line x1="18" y1="20" x2="18" y2="10" />
       <line x1="12" y1="20" x2="12" y2="4" />
       <line x1="6"  y1="20" x2="6"  y2="14" />
+    </svg>
+  );
+}
+
+/** A hub with satellites — the radial map, drawn small. */
+function BrainIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="2.4" />
+      <circle cx="12" cy="4" r="1.6" />
+      <circle cx="19" cy="16" r="1.6" />
+      <circle cx="5" cy="16" r="1.6" />
+      <line x1="12" y1="9.6" x2="12" y2="5.6" />
+      <line x1="13.9" y1="13.4" x2="17.5" y2="15.2" />
+      <line x1="10.1" y1="13.4" x2="6.5" y2="15.2" />
     </svg>
   );
 }
@@ -196,6 +212,14 @@ export function Sidebar({
         >
           <span className="nav-item-icon"><ChatIcon /></span>
           <span>Ask</span>
+        </button>
+        <button
+          className={"nav-item" + (tab === "archive" ? " nav-item--active" : "")}
+          onClick={() => onTab("archive")}
+          title="Archive map"
+        >
+          <span className="nav-item-icon"><BrainIcon /></span>
+          <span>Archive</span>
         </button>
         <button
           className={"nav-item" + (tab === "analytics" ? " nav-item--active" : "")}
