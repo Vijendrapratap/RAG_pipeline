@@ -101,7 +101,12 @@ def test_header_format():
     assert "timestamps unavailable" in head
 
 
-def test_process_file_writes_chunks_json(tmp_path):
+def test_process_file_writes_chunks_json(tmp_path, monkeypatch):
+    # rag_api.config loads .env into os.environ at import time, so whichever
+    # test imports it first leaks RAW_TRANSCRIPTS_BASE_DIR into this one and
+    # _path_meta_for starts prepending a metadata header. This test covers the
+    # no-base-dir path; pin the environment rather than depend on test order.
+    monkeypatch.delenv("RAW_TRANSCRIPTS_BASE_DIR", raising=False)
     out_dir = tmp_path / "out"
     failed_dir = out_dir / "_failed"
     n, status = ct.process_file(FIXTURES / "sample_plain.txt", out_dir,

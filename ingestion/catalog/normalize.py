@@ -7,9 +7,11 @@ literal dicts. Every record carries a `join_key` built with the SAME grammar
 row and its transcript folder collapse onto one key (see `join_key_from_path`).
 
 Design decisions (mirroring the locked Phase 12 conventions):
-  * Season + track-type come from `path_parser.season_for` /
-    `track_type_for` — never re-implemented here, so the two sources can
-    never drift apart in their vocabularies.
+  * Season, track-type and month folding come from `path_parser.season_for` /
+    `track_type_for` / `month_num` — never re-implemented here, so the two
+    sources can never drift apart in their vocabularies. (They did: this module
+    accepted `[A-Za-z]{3,}` months while path_parser accepted only `[A-Z]{3}`,
+    so a catalog row for a JUNE camp had no folder to join to.)
   * `session_date` = date(CampYear, month-from-Sitting, day-from-Sitting).
     The Sitting cell already encodes day + month; CampYear supplies the year.
   * CampYear == 1900 is the export's "year unknown" sentinel — kept, but
@@ -31,17 +33,11 @@ from pathlib import Path
 from typing import Any
 
 from ingestion.utils.path_parser import (
+    month_num,
     parse_path,
     season_for,
     track_type_for,
 )
-
-# Three-letter month keys (uppercased first 3 chars of whatever the cell uses:
-# "Apr", "June", "NOV" all fold to JAN..DEC). Mirrors path_parser._MONTHS.
-_MONTHS: dict[str, int] = {
-    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-}
 
 # The export encodes carriage returns from the original cells as this token.
 _CR_TOKEN = "_x000D_"
@@ -84,10 +80,6 @@ def clean_text(value: Any) -> str | None:
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip() or None
-
-
-def _month_num(token: str) -> int | None:
-    return _MONTHS.get(token[:3].upper())
 
 
 # Metros whose camps appear under neighbourhood-qualified folder names
@@ -170,7 +162,7 @@ def parse_sitting(raw: Any, camp_year: int | None) -> ParsedSitting:
     if m.group("seq") is not None:
         out.session_seq = int(m.group("seq"))
 
-    month = _month_num(m.group("mon"))
+    month = month_num(m.group("mon"))
     if month is None:
         out.warnings.append(f"sitting: unknown month in {text!r}")
     elif camp_year is None:

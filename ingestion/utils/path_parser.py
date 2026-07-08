@@ -2,25 +2,35 @@
 
 Per PRD §6 Phase 12.
 
-Expected layout (one path level per directory):
+Canonical layout (the PRD example)::
 
     <base_dir>/
-      <Collection> <YYYY>/                      e.g. "Live Masters 2010"
-        <NN> <LOCATION> <D1> - <D2> <MON> <YYYY>/   e.g. "01 NOIDA 7 - 10 JAN 2010"
-          <D> <MON> - <SEQ>$ - <H> <AM|PM>/         e.g. "7 JAN - 1$ - 6 PM"
-            <NN> <TITLE>.<ext>                     e.g. "04 PRAVACHAN.wav"
+      <Collection> <YYYY>/                          "Live Masters 2010"
+        <NN> <LOCATION> <D1> - <D2> <MON> <YYYY>/   "01 NOIDA 7 - 10 JAN 2010"
+          <D> <MON> - <SEQ>$ - <H> <AM|PM>/         "7 JAN - 1$ - 6 PM"
+            <NN> <TITLE>.<ext>                      "04 PRAVACHAN.wav"
+
+The real corpus is messier. The Dagshai tree inserts a month-bucket level
+("01 JAN - 2001"), sometimes omits the event level entirely, and sometimes
+inserts a media-container folder ("MD RECORDING OF THIS CAMP") between event
+and session. Directory depth therefore ranges from 2 to 5. Levels are
+consequently identified **by the shape of the folder name, not by its position
+in the path** — see `_classify_folder`. A folder that matches no level grammar
+contributes nothing and is skipped (media containers, "New folder", whisper's
+`turbo/` and `_model-*` scaffolding all fall out through the same door).
 
 Every level is parsed best-effort: a malformed level still yields a
 PathMetadata object with the unparsed fields set to None and a human-readable
 warning appended to `parse_warnings`. The caller (chunker / ingester) decides
 whether to log, quarantine, or proceed — this module never raises on bad
-input. Per CLAUDE.md rule 6 (no silent swallowing) every failed-to-parse
+input. Per CLAUDE.md rule 6 (no silent swallowing) every missing or failed
 level produces a warning string.
 
 Public surface:
     parse_path(path, base_dir=None) -> PathMetadata
     season_for(d: date) -> str
     track_type_for(title: str) -> str
+    month_num(token: str) -> int | None
     PRIMARY_SPEAKER: str
 """
 from __future__ import annotations
@@ -53,11 +63,21 @@ SEASON_BY_MONTH: dict[int, str] = {
     10: "post-monsoon", 11: "post-monsoon", 12: "post-monsoon",
 }
 
-# Three-letter month abbreviations as used in folder names (uppercase).
+# Month keys are the uppercased first three characters, so "Apr", "APRIL",
+# "June" and "SEPT" all fold onto JAN..DEC. Folder names in the corpus mix all
+# four styles within a single tree.
 _MONTHS: dict[str, int] = {
     "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
+
+
+def month_num(token: str) -> int | None:
+    """Fold a month token of any length ('Apr', 'APRIL', 'June') to 1..12.
+    Returns None for anything that isn't a month — this is what stops words
+    like 'NOON' from being read as a month by the `[A-Za-z]{3,}` grammars."""
+    return _MONTHS.get(token[:3].upper()) if len(token) >= 3 else None
+
 
 # Suffixes appended by the upstream vocal-isolation / whisper pipelines.
 # These get tacked onto folder names ("Live Masters 2010_isolation") and must
@@ -66,14 +86,11 @@ _MONTHS: dict[str, int] = {
 _FOLDER_SUFFIX_RE = re.compile(r"(_isolation|_model-.*)$")
 
 # Folders matching this pattern are inserted by the whisper pipeline between
-# the session-level folder and the actual transcript files. They carry no
-# semantic information for retrieval; drop them when walking levels so the
-# parser sees the intended 4-level structure.
+# the session-level folder and the actual transcript files.
 _MODEL_FOLDER_RE = re.compile(r"_model-")
 
 # Exact folder names produced by the whisper CLI as a leaf scaffolding
-# directory (one per inference model size). Drop these from the parent
-# chain. Keep this list narrow — only names we've seen in this pipeline.
+# directory (one per inference model size).
 _SCAFFOLDING_FOLDERS: frozenset[str] = frozenset({"turbo"})
 
 
@@ -89,35 +106,59 @@ def _is_pipeline_scaffolding(name: str) -> bool:
     return name in _SCAFFOLDING_FOLDERS or bool(_MODEL_FOLDER_RE.search(name))
 
 
-# Regex grammars. Liberal on whitespace; case-insensitive where it matters.
-# Collection: any text ending with a 4-digit year.
-_COLLECTION_RE = re.compile(r"^(?P<name>.+?)\s+(?P<year>\d{4})$")
+# --- Level grammars ---------------------------------------------------------
+#
+# Tried in this order. The order is load-bearing: "01 JAN - 2001" satisfies
+# the collection grammar's "<text> <year>" shape, and "DAGSHAI 15 - 19 JAN
+# 2001" satisfies both, so the most specific grammar must win.
 
-# Event: "<NN> <LOC...> <D1> - <D2> <MON> <YYYY>"
-# Location may contain spaces ("NEW DELHI"); month is uppercase 3-letter.
+# Event: an optional sequence number, a location, and a day RANGE.
+# Handles every observed variant:
+#   "01 NOIDA 7 - 10 JAN 2010"                seq + loc, month/year on d2 only
+#   "DAGSHAI 15 - 19 JAN 2001"                no seq
+#   "DAGSHAI 10 - 13 JUNE CHILDREN CAMP"      no year (inherited), trailing tail
+#   "08 BATHINDA 30 NOV - 2 DEC 2013"         month on both ends
+#   "08 CHHATTARPUR DELHI 30 DEC 2014 - 1 JAN 2015"   cross-year camp
 _EVENT_RE = re.compile(
-    r"^(?P<seq>\d+)\s+"
-    r"(?P<loc>.+?)\s+"
-    r"(?P<d1>\d{1,2})\s*-\s*(?P<d2>\d{1,2})\s+"
-    r"(?P<mon>[A-Z]{3})\s+"
-    r"(?P<year>\d{4})$",
-    re.IGNORECASE,
+    r"^(?:(?P<seq>\d{1,3})\s+)?"
+    r"(?P<loc>[A-Za-z][^\d]*?)\s+"
+    r"(?P<d1>\d{1,2})(?:\s+(?P<mon1>[A-Za-z]{3,}))?(?:\s+(?P<y1>\d{4}))?"
+    r"\s*-\s*"
+    r"(?P<d2>\d{1,2})\s+(?P<mon2>[A-Za-z]{3,})(?:\s+(?P<y2>\d{4}))?"
+    r"(?:\s+(?P<tail>\S.*))?$"
 )
 
-# Session: "<D> <MON> - <SEQ>$ - <H> <AM|PM>"
-# The $ marker after SEQ is optional (older folders may use a hyphen alone).
-# Time may be written as "6 PM" (H), "10:30 AM" (H:MM), or "1030 AM" (HHMM
-# without colon — observed in upstream whisper pipeline output).
-_SESSION_RE = re.compile(
-    r"^(?P<day>\d{1,2})\s+(?P<mon>[A-Z]{3})\s*-\s*"
-    r"(?P<seq>\d+)\$?\s*-\s*"
-    r"(?P<hour>\d{1,4})(?::(?P<minute>\d{2}))?\s*"
-    r"(?P<mer>AM|PM)$",
-    re.IGNORECASE,
+# Month bucket: the Dagshai tree groups sittings by calendar month before
+# (or instead of) the event level. Carries a year, nothing else.
+#   "01 JAN - 2001"
+_MONTH_BUCKET_RE = re.compile(
+    r"^\d{1,2}\s+(?P<mon>[A-Za-z]{3,})\s*-\s*(?P<year>\d{4})$"
 )
 
-# Track: "<NN> <TITLE>" (extension already stripped). TITLE may contain
-# spaces and special characters; keep entire remainder as raw title.
+# Collection: a name (no digits) followed by a 4-digit year.
+#   "Live Masters 2010", "Dagshai 2001"
+_COLLECTION_RE = re.compile(r"^(?P<name>[A-Za-z][^\d]*?)\s+(?P<year>\d{4})$")
+
+# Session: a day + month, then anything. The sequence marker and the clock
+# time are pulled out of the remainder separately because both are optional
+# and appear with wildly inconsistent punctuation:
+#   "7 JAN - 1$ - 6 PM"      "10 JAN - 6 PM"        "8 AUG 12 NOON"
+#   "25 MAR-2$-12 NOON"      "13 FEB - 6 PM (CASS REC)"
+#   "18 MAY 1 PM - SCHOOL CHILDREN"                 "30 JUNE - NO TIME"
+#   "26 JAN MORNING"         "16 JAN"               "08 APRIL"
+_SESSION_RE = re.compile(r"^(?P<day>\d{1,2})\s+(?P<mon>[A-Za-z]{3,})\b(?P<rest>.*)$")
+
+# "- 1$ -", " 2$ ", "-2$-". The '$' must directly follow digits, so a bare
+# "$" marker ("13 JAN - LOHRI CELEBRATION $") is correctly read as no seq.
+_SESSION_SEQ_RE = re.compile(r"(?:^|[-\s])(?P<seq>\d{1,2})\s*\$")
+
+# "6 PM", "10:30 AM", "630 PM", "1230 PM". Anchored on the meridiem.
+_SESSION_TIME_RE = re.compile(
+    r"\b(?P<hour>\d{1,4})(?::(?P<minute>\d{2}))?\s*(?P<mer>AM|PM)\b", re.IGNORECASE
+)
+_SESSION_NOON_RE = re.compile(r"\bNOON\b", re.IGNORECASE)
+
+# Track: "<NN> <TITLE>" (extension already stripped).
 _TRACK_RE = re.compile(r"^(?P<no>\d+)\s+(?P<title>.+?)$")
 
 
@@ -215,86 +256,6 @@ def track_type_for(title: str) -> str:
     return TRACK_TYPE_VOCAB.get(normalized, DEFAULT_TRACK_TYPE)
 
 
-def _parse_collection(name: str, meta: PathMetadata) -> None:
-    m = _COLLECTION_RE.match(_strip_folder_suffix(name))
-    if not m:
-        meta.parse_warnings.append(f"collection: could not parse {name!r}")
-        return
-    meta.collection = m.group("name").strip()
-    try:
-        meta.year = int(m.group("year"))
-    except ValueError:
-        meta.parse_warnings.append(f"collection: bad year in {name!r}")
-
-
-def _parse_event(name: str, meta: PathMetadata) -> None:
-    cleaned = _strip_folder_suffix(name)
-    m = _EVENT_RE.match(cleaned)
-    if not m:
-        meta.parse_warnings.append(f"event: could not parse {name!r}")
-        return
-    meta.event_id = cleaned
-    try:
-        meta.event_seq = int(m.group("seq"))
-    except ValueError:
-        meta.parse_warnings.append(f"event: bad seq in {name!r}")
-    meta.location = m.group("loc").strip().upper()
-    mon_key = m.group("mon").upper()
-    if mon_key not in _MONTHS:
-        meta.parse_warnings.append(f"event: unknown month {mon_key!r} in {name!r}")
-        return
-    month = _MONTHS[mon_key]
-    try:
-        year = int(m.group("year"))
-        d1 = int(m.group("d1"))
-        d2 = int(m.group("d2"))
-        meta.event_start = date(year, month, d1)
-        meta.event_end = date(year, month, d2)
-    except (ValueError, OverflowError) as e:
-        meta.parse_warnings.append(f"event: bad date in {name!r}: {e}")
-
-
-def _parse_session(name: str, meta: PathMetadata) -> None:
-    m = _SESSION_RE.match(_strip_folder_suffix(name))
-    if not m:
-        meta.parse_warnings.append(f"session: could not parse {name!r}")
-        return
-    mon_key = m.group("mon").upper()
-    if mon_key not in _MONTHS:
-        meta.parse_warnings.append(f"session: unknown month {mon_key!r} in {name!r}")
-        return
-    month = _MONTHS[mon_key]
-    # Year for session comes from the event (or collection) — sessions don't
-    # carry their own year. Fall back to collection year if event missing.
-    year = meta.event_start.year if meta.event_start else meta.year
-    if year is None:
-        meta.parse_warnings.append(
-            f"session: no year context for {name!r} (event + collection both missing)"
-        )
-    try:
-        meta.session_seq = int(m.group("seq"))
-    except ValueError:
-        meta.parse_warnings.append(f"session: bad seq in {name!r}")
-    if year is not None:
-        try:
-            meta.session_date = date(year, month, int(m.group("day")))
-        except (ValueError, OverflowError) as e:
-            meta.parse_warnings.append(f"session: bad date in {name!r}: {e}")
-    try:
-        hour_raw = m.group("hour")
-        # HHMM without colon: "1030" → 10:30, "930" → 9:30
-        if len(hour_raw) >= 3:
-            hour_12 = int(hour_raw[:-2])
-            minute = int(hour_raw[-2:])
-        else:
-            hour_12 = int(hour_raw)
-            minute = int(m.group("minute")) if m.group("minute") else 0
-        hour_24 = _to_24h(hour_12, m.group("mer").upper())
-        meta.session_time = time(hour_24, minute)
-    except (ValueError, OverflowError) as e:
-        meta.parse_warnings.append(f"session: bad time in {name!r}: {e}")
-
-
 def _to_24h(hour_12: int, meridiem: str) -> int:
     """Convert 12-hour to 24-hour. 12 AM -> 0; 12 PM -> 12; others +12 if PM."""
     if not 1 <= hour_12 <= 12:
@@ -304,6 +265,148 @@ def _to_24h(hour_12: int, meridiem: str) -> int:
     if meridiem == "PM":
         return 12 if hour_12 == 12 else hour_12 + 12
     raise ValueError(f"bad meridiem {meridiem!r}")
+
+
+# --- Shape classification ---------------------------------------------------
+
+def _classify_folder(name: str) -> tuple[str, re.Match[str]] | None:
+    """Identify which level a folder name belongs to from its shape alone.
+
+    Returns (level, match) for 'event' | 'month_bucket' | 'collection' |
+    'session', or None when the name matches no grammar — media containers
+    ("MD RECORDING OF THIS CAMP"), undated sittings ("EVENING $"), and
+    pipeline scaffolding all land here and are skipped by the caller.
+
+    Order is significant: the event grammar and the month-bucket grammar both
+    produce strings that also satisfy the (looser) collection and session
+    grammars, so the specific ones are tried first.
+    """
+    m = _EVENT_RE.match(name)
+    if m and month_num(m.group("mon2")) is not None:
+        mon1 = m.group("mon1")
+        if mon1 is None or month_num(mon1) is not None:
+            return "event", m
+
+    m = _MONTH_BUCKET_RE.match(name)
+    if m and month_num(m.group("mon")) is not None:
+        return "month_bucket", m
+
+    m = _COLLECTION_RE.match(name)
+    if m:
+        return "collection", m
+
+    m = _SESSION_RE.match(name)
+    if m and month_num(m.group("mon")) is not None:
+        return "session", m
+
+    return None
+
+
+def _parse_collection(name: str, m: re.Match[str], meta: PathMetadata) -> None:
+    meta.collection = m.group("name").strip()
+    meta.year = int(m.group("year"))
+
+
+def _parse_month_bucket(name: str, m: re.Match[str], meta: PathMetadata) -> None:
+    """The month bucket contributes a year only. It is a grouping folder, not
+    an event: it has no location and no day range."""
+    if meta.year is None:
+        meta.year = int(m.group("year"))
+
+
+def _parse_event(name: str, m: re.Match[str], meta: PathMetadata) -> None:
+    meta.event_id = name
+    if m.group("seq"):
+        meta.event_seq = int(m.group("seq"))
+    meta.location = re.sub(r"\s+", " ", m.group("loc").strip()).upper()
+
+    mon2 = month_num(m.group("mon2"))
+    mon1 = month_num(m.group("mon1")) if m.group("mon1") else mon2
+    # "DAGSHAI 10 - 13 JUNE CHILDREN CAMP" carries no year — inherit the
+    # collection's. The end year defaults to the start year, and vice versa.
+    y2 = int(m.group("y2")) if m.group("y2") else meta.year
+    y1_explicit = m.group("y1") is not None
+    y1 = int(m.group("y1")) if y1_explicit else y2
+    if y2 is None:
+        meta.parse_warnings.append(f"event: no year context for {name!r}")
+        return
+    try:
+        start = date(y1, mon1, int(m.group("d1")))
+        end = date(y2, mon2, int(m.group("d2")))
+    except (ValueError, OverflowError) as e:
+        meta.parse_warnings.append(f"event: bad date in {name!r}: {e}")
+        return
+    if start > end:
+        # "17 NEW YEAR DELHI 30 DEC - 1 JAN 2012" writes the year once, at the
+        # end. Inheriting it for both ends puts 30 DEC *after* 1 JAN; the camp
+        # actually opened in the previous December.
+        if y1_explicit:
+            meta.parse_warnings.append(f"event: start after end in {name!r}")
+        else:
+            start = date(y1 - 1, mon1, start.day)
+    meta.event_start, meta.event_end = start, end
+
+
+def _session_year(month: int, day: int, meta: PathMetadata) -> int | None:
+    """Pick the year for a session date. Sessions carry a day and a month but
+    never a year, so it comes from the enclosing event span.
+
+    A New Year camp ("30 DEC 2014 - 1 JAN 2015") spans two years, and taking
+    `event_start.year` unconditionally dated its 1 JAN sitting to 2014 — one
+    year early, and colliding with a genuine 1 JAN 2014 camp on the
+    date-anchored catalog join key. Choose the year that puts the sitting
+    inside the camp's own span.
+    """
+    start, end = meta.event_start, meta.event_end
+    if start and end:
+        for y in dict.fromkeys((start.year, end.year)):
+            try:
+                candidate = date(y, month, day)
+            except ValueError:
+                continue
+            if start <= candidate <= end:
+                return y
+        return start.year
+    if start:
+        return start.year
+    return meta.year
+
+
+def _parse_session(name: str, m: re.Match[str], meta: PathMetadata) -> None:
+    month = month_num(m.group("mon"))
+    day = int(m.group("day"))
+    rest = m.group("rest")
+
+    seq_m = _SESSION_SEQ_RE.search(rest)
+    if seq_m:
+        meta.session_seq = int(seq_m.group("seq"))
+
+    year = _session_year(month, day, meta)
+    if year is None:
+        meta.parse_warnings.append(
+            f"session: no year context for {name!r} (event + collection both missing)"
+        )
+    else:
+        try:
+            meta.session_date = date(year, month, day)
+        except (ValueError, OverflowError) as e:
+            meta.parse_warnings.append(f"session: bad date in {name!r}: {e}")
+
+    time_m = _SESSION_TIME_RE.search(rest)
+    if time_m:
+        try:
+            hour_raw = time_m.group("hour")
+            # HHMM without colon: "1030" → 10:30, "930" → 9:30
+            if len(hour_raw) >= 3:
+                hour_12, minute = int(hour_raw[:-2]), int(hour_raw[-2:])
+            else:
+                hour_12 = int(hour_raw)
+                minute = int(time_m.group("minute")) if time_m.group("minute") else 0
+            meta.session_time = time(_to_24h(hour_12, time_m.group("mer").upper()), minute)
+        except (ValueError, OverflowError) as e:
+            meta.parse_warnings.append(f"session: bad time in {name!r}: {e}")
+    elif _SESSION_NOON_RE.search(rest):
+        meta.session_time = time(12, 0)
 
 
 def _parse_track(name: str, meta: PathMetadata) -> None:
@@ -365,48 +468,36 @@ def parse_path(path: Path | str, base_dir: Path | str | None = None) -> PathMeta
         meta.parse_warnings.append("empty path after stripping anchor/base_dir")
         return meta
 
-    # Drop whisper model-name folders from the parent chain (e.g.
-    # "04 PRAVACHAN_model-1_mel_roformer_kim_ft"). They sit between the
-    # session folder and the actual transcript file and would otherwise
-    # shift every level by one. Only filter parents — never the track itself.
-    if len(parts) > 1:
-        parents_kept = [p for p in parts[:-1] if not _is_pipeline_scaffolding(p)]
-        parts = parents_kept + [parts[-1]]
-
-    # The track is always the last component (the file itself). The three
-    # parents above it (if present) map to session, event, collection.
+    # The track is always the last component (the file itself). Every folder
+    # above it is classified by shape; unrecognized folders (whisper
+    # scaffolding, media containers, "New folder") contribute nothing.
     track_name = parts[-1]
-    parents = parts[:-1]
+    parents = [_strip_folder_suffix(x) for x in parts[:-1]
+               if not _is_pipeline_scaffolding(x)]
 
-    # Walk from rightmost upward so that a path shallower than 4 levels
-    # still parses the deepest meaningful folders. The known order
-    # (collection > event > session > track) is encoded by index.
-    if len(parents) >= 3:
-        collection_name = parents[-3]
-        event_name = parents[-2]
-        session_name = parents[-1]
-    elif len(parents) == 2:
-        collection_name = None
-        event_name = parents[-2]
-        session_name = parents[-1]
-        meta.parse_warnings.append("collection level missing (path < 4 levels)")
-    elif len(parents) == 1:
-        collection_name = None
-        event_name = None
-        session_name = parents[-1]
-        meta.parse_warnings.append("collection and event levels missing")
-    else:
-        collection_name = None
-        event_name = None
-        session_name = None
-        meta.parse_warnings.append("only track name present (no enclosing folders)")
+    # Left-to-right so the collection year is in hand before the event needs
+    # it, and the event span before the session needs it. A repeated level
+    # keeps the deepest (rightmost) folder, which is the more specific one.
+    found: dict[str, tuple[str, re.Match[str]]] = {}
+    for name in parents:
+        hit = _classify_folder(name)
+        if hit is None:
+            meta.parse_warnings.append(f"folder: unrecognized level {name!r} - skipped")
+            continue
+        found[hit[0]] = (name, hit[1])
 
-    if collection_name:
-        _parse_collection(collection_name, meta)
-    if event_name:
-        _parse_event(event_name, meta)
-    if session_name:
-        _parse_session(session_name, meta)
+    for level, parser in (
+        ("collection", _parse_collection),
+        ("month_bucket", _parse_month_bucket),
+        ("event", _parse_event),
+        ("session", _parse_session),
+    ):
+        if level in found:
+            name, m = found[level]
+            parser(name, m, meta)
+        elif level in ("collection", "event", "session"):
+            meta.parse_warnings.append(f"{level}: no {level}-level folder found in path")
+
     _parse_track(track_name, meta)
 
     if meta.session_date:

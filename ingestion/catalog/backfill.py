@@ -42,9 +42,9 @@ from typing import Any
 from ingestion.catalog.normalize import (
     CatalogTrack,
     join_key_from_fields,
-    join_key_from_path,
     rows_to_tracks,
 )
+from ingestion.utils.path_parser import parse_path
 
 log = logging.getLogger("ingestion.catalog.backfill")
 
@@ -60,14 +60,31 @@ def _sitting_key(t: CatalogTrack) -> str | None:
     return join_key_from_fields(t.session_date, t.session_seq, None)
 
 
-def _scan_audio_keys(audio_root: Path, glob: str) -> set[str]:
-    keys: set[str] = set()
+def _scan_audio_keys(audio_root: Path, glob: str) -> tuple[set[str], dict[str, set[str]]]:
+    """Map on-disk transcripts to join keys.
+
+    Returns (safe_keys, ambiguous). The join key is date-anchored
+    (``date|seq|track_no``) and carries no event, so two camps whose sittings
+    fall on the same day with the same sequence and track number collapse onto
+    one key. `_qdrant_filter_for` would then write one camp's performers and
+    title onto the other camp's chunks. Such keys are reported and excluded —
+    a missing enrichment is recoverable, a wrong one is not.
+    """
+    key_to_events: dict[str, set[str]] = {}
     for p in audio_root.glob(glob):
-        if p.is_file():
-            k = join_key_from_path(p, base_dir=audio_root)
-            if k:
-                keys.add(k)
-    return keys
+        if not p.is_file():
+            continue
+        meta = parse_path(p, base_dir=audio_root)
+        k = join_key_from_fields(meta.session_date, meta.session_seq, meta.track_no)
+        if k:
+            key_to_events.setdefault(k, set()).add(meta.event_id or "<no-event>")
+    ambiguous = {k: v for k, v in key_to_events.items() if len(v) > 1}
+    safe = set(key_to_events) - set(ambiguous)
+    for k, events in sorted(ambiguous.items()):
+        log.error("join_key %s maps to %d distinct events (%s) - skipping "
+                  "enrichment for it; the catalog cannot tell them apart",
+                  k, len(events), " | ".join(sorted(events)))
+    return safe, ambiguous
 
 
 # --- Postgres ---------------------------------------------------------------
@@ -227,15 +244,20 @@ def main(argv: list[str] | None = None) -> int:
     keyed = [t for t in tracks if t.join_key]
     log.info("normalised %d tracks (%d keyed)", len(tracks), len(keyed))
 
-    # Scope the Qdrant pass to tracks that have audio, if a root was given.
+    # Scope the Qdrant pass to tracks that have audio. This is also the only
+    # place ambiguous join keys can be detected, so it is mandatory for a
+    # Qdrant commit — see _scan_audio_keys.
     qdrant_targets = keyed
     if args.audio_root is not None and args.audio_root.exists():
-        audio_keys = _scan_audio_keys(args.audio_root, args.audio_glob)
+        audio_keys, ambiguous = _scan_audio_keys(args.audio_root, args.audio_glob)
         qdrant_targets = [t for t in keyed if t.join_key in audio_keys]
-        log.info("audio scan: %d on-disk keys -> %d catalog tracks have audio",
-                 len(audio_keys), len(qdrant_targets))
-    elif args.qdrant and not args.commit:
-        log.warning("no --audio-root: a commit would push all %d keyed tracks", len(keyed))
+        log.info("audio scan: %d unambiguous on-disk keys (%d ambiguous, excluded) "
+                 "-> %d catalog tracks have audio",
+                 len(audio_keys), len(ambiguous), len(qdrant_targets))
+    elif args.qdrant:
+        log.error("--qdrant requires --audio-root: without it, ambiguous join keys "
+                  "cannot be detected and %d tracks would be pushed blind", len(keyed))
+        return 2
 
     if not args.commit:
         log.info("DRY-RUN (no writes). Pass --commit to apply.")

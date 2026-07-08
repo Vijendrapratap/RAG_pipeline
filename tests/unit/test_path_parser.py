@@ -19,6 +19,7 @@ from ingestion.utils.path_parser import (
     PRIMARY_SPEAKER,
     SEASON_BY_MONTH,
     PathMetadata,
+    month_num,
     parse_path,
     season_for,
     track_type_for,
@@ -510,3 +511,176 @@ def test_primary_speaker_propagates_to_metadata():
     # Even on failure paths:
     meta_bad = parse_path("/nonsense.wav")
     assert meta_bad.primary_speaker == PRIMARY_SPEAKER
+
+
+# ---- Real corpus shapes: levels identified by shape, not position -----
+#
+# Every folder name below was taken verbatim from
+# `D:\Transcription whisperx\Output`. The position-based parser these tests
+# replaced resolved session_date on 35.3% of distinct directory chains; this
+# suite pins the shapes that took it to 98.8% of files.
+
+_D = "/mnt/d/Transcription whisperx/Output"
+
+
+def _sd(chain: str, track: str = "04 PRAVACHAN.raw.json"):
+    return parse_path(f"{_D}/{chain}/{track}", base_dir=_D)
+
+
+def test_dagshai_month_bucket_is_not_an_event():
+    """The Dagshai tree groups sittings under a calendar-month folder that
+    carries a year but no location and no day range. Reading it as the event
+    level (position -2) dropped the session year for 11,350 chunks."""
+    meta = _sd("Dagshai 2001_isolation/01 JAN - 2001_isolation/10 JAN - 6 PM_isolation")
+    assert meta.collection == "Dagshai"
+    assert meta.year == 2001
+    assert meta.event_id is None          # month bucket is NOT an event
+    assert meta.location is None
+    assert meta.session_date == date(2001, 1, 10)
+    assert meta.session_time == time(18, 0)
+
+
+def test_dagshai_five_level_path_with_media_container():
+    """A media-container folder ('MD RECORDING OF THIS CAMP') sits between the
+    event and the session. It carries no metadata and must not shift levels."""
+    meta = _sd(
+        "Dagshai 2001_isolation/01 JAN - 2001_isolation/"
+        "DAGSHAI 15 - 19 JAN 2001_isolation/MD RECORDING OF THIS CAMP_isolation/"
+        "16 JAN - 1$ - 8 AM_isolation"
+    )
+    assert meta.event_id == "DAGSHAI 15 - 19 JAN 2001"
+    assert meta.location == "DAGSHAI"
+    assert meta.event_seq is None         # this event has no leading sequence
+    assert meta.session_date == date(2001, 1, 16)
+    assert meta.session_seq == 1
+    assert meta.session_time == time(8, 0)
+
+
+@pytest.mark.parametrize(
+    "folder, expected_date, expected_time, expected_seq",
+    [
+        # Four-letter months: "JUNE"/"JULY"/"APRIL" against the old [A-Z]{3}.
+        ("12 JUNE - 3$ - 6 PM", date(2011, 6, 12), time(18, 0), 3),
+        ("08 APRIL", date(2011, 4, 8), None, None),
+        # No sequence marker at all.
+        ("10 JAN - 6 PM", date(2011, 1, 10), time(18, 0), None),
+        # No dash between date and time.
+        ("8 AUG 7 PM", date(2011, 8, 8), time(19, 0), None),
+        ("2 JUNE 630 PM", date(2011, 6, 2), time(18, 30), None),
+        # No spaces around the dashes; NOON as the clock.
+        ("25 MAR-2$-12 NOON", date(2011, 3, 25), time(12, 0), 2),
+        ("14 AUG 2$ 12 NOON", date(2011, 8, 14), time(12, 0), 2),
+        # Trailing parentheticals and free-text notes after the time.
+        ("13 FEB - 6 PM (CASS REC)", date(2011, 2, 13), time(18, 0), None),
+        ("14 NOV - 530 PM (DEEPAWALI)", date(2011, 11, 14), time(17, 30), None),
+        ("18 MAY 1 PM - SCHOOL CHILDREN", date(2011, 5, 18), time(13, 0), None),
+        ("7 SEP 1230 PM ARMY PUBLIC SCHOOL", date(2011, 9, 7), time(12, 30), None),
+        # Named sittings: dated, but with no clock time.
+        ("28 NOV - WELCOME - 8 PM", date(2011, 11, 28), time(20, 0), None),
+        ("11 APR - WELCOME - EVENING", date(2011, 4, 11), None, None),
+        ("30 JUNE - NO TIME", date(2011, 6, 30), None, None),
+        ("26 JAN MORNING", date(2011, 1, 26), None, None),
+        ("2 JULY GURUPURNIMA", date(2011, 7, 2), None, None),
+        # A bare '$' with no digits is not a sequence number.
+        ("13 JAN - LOHRI CELEBRATION $", date(2011, 1, 13), None, None),
+        ("8 JUN 7$ INDIVIDUAL MEDITATION ON 26 NO. HILLS",
+         date(2011, 6, 8), None, 7),
+    ],
+)
+def test_real_session_folder_shapes(folder, expected_date, expected_time, expected_seq):
+    meta = _sd(f"Dagshai 2011_isolation/{folder}_isolation")
+    assert meta.session_date == expected_date
+    assert meta.session_time == expected_time
+    assert meta.session_seq == expected_seq
+
+
+@pytest.mark.parametrize(
+    "folder, seq, loc, start, end",
+    [
+        ("01 NOIDA 7 - 10 JAN 2010", 1, "NOIDA", date(2010, 1, 7), date(2010, 1, 10)),
+        # No leading sequence number.
+        ("DAGSHAI 15 - 19 JAN 2001", None, "DAGSHAI",
+         date(2001, 1, 15), date(2001, 1, 19)),
+        # Dotted / multi-word location.
+        ("05 MCF AUDI. FARIDABAD 22 - 25 JAN 2010", 5, "MCF AUDI. FARIDABAD",
+         date(2010, 1, 22), date(2010, 1, 25)),
+        # Month on both ends of the range.
+        ("08 BATHINDA 30 NOV - 2 DEC 2013", 8, "BATHINDA",
+         date(2013, 11, 30), date(2013, 12, 2)),
+        # Trailing camp label, and no year at all (inherited from collection).
+        ("DAGSHAI 10 - 13 JUNE CHILDREN CAMP", None, "DAGSHAI",
+         date(2010, 6, 10), date(2010, 6, 13)),
+        ("DAGSHAI 10 - 13 MAR 2002 SHIVRATRI CAMP", None, "DAGSHAI",
+         date(2002, 3, 10), date(2002, 3, 13)),
+    ],
+)
+def test_real_event_folder_shapes(folder, seq, loc, start, end):
+    meta = _sd(f"Live Masters 2010_isolation/{folder}_isolation/7 JAN - 1$ - 6 PM_isolation")
+    assert meta.event_seq == seq
+    assert meta.location == loc
+    assert meta.event_start == start
+    assert meta.event_end == end
+
+
+# ---- Cross-year camps: the catalog join-key collision ------------------
+
+
+def test_new_year_camp_session_dated_from_the_span_not_the_start_year():
+    """'30 DEC 2014 - 1 JAN 2015' spans two years. Taking event_start.year
+    unconditionally dated the 1 JAN sitting to 2014-01-01 — one year early,
+    and identical to the join_key of a genuine 1 JAN 2014 camp, so the catalog
+    backfill wrote Siri Fort's performers onto Chhattarpur's chunks."""
+    chain = ("Live Masters 2014_isolation/"
+             "17 CHHATTARPUR DELHI 30 DEC 2014 - 1 JAN 2015_isolation")
+    assert _sd(f"{chain}/1 JAN - 4$ - 7 PM_isolation").session_date == date(2015, 1, 1)
+    assert _sd(f"{chain}/30 DEC - 1$ - 7 PM_isolation").session_date == date(2014, 12, 30)
+    # A sitting outside the span (arrival day) keeps the start year.
+    assert _sd(f"{chain}/29 DEC - 6 PM_isolation").session_date == date(2014, 12, 29)
+
+
+def test_new_year_camp_with_year_written_once_backs_off_the_start_year():
+    """'30 DEC - 1 JAN 2012' writes the year only at the end. Inheriting it for
+    both ends yields start=2012-12-30 > end=2012-01-01."""
+    meta = _sd("Live Masters 2011_isolation/17 NEW YEAR DELHI 30 DEC - 1 JAN 2012_isolation/"
+               "30 DEC - 1$ - 7 PM_isolation")
+    assert meta.event_start == date(2011, 12, 30)
+    assert meta.event_end == date(2012, 1, 1)
+    assert meta.session_date == date(2011, 12, 30)
+    assert meta.parse_warnings == []
+
+
+def test_session_outside_a_normal_span_keeps_the_event_year():
+    meta = _sd("Live Masters 2010_isolation/23 JIND 19 - 21 NOV 2010_isolation/"
+               "22 NOV - 6 PM_isolation")
+    assert meta.session_date == date(2010, 11, 22)
+
+
+# ---- Unrecognized folders contribute nothing (and say so) --------------
+
+
+@pytest.mark.parametrize(
+    "folder",
+    ["MD RECORDING", "MD-42 (This MD is not playing properly)", "MISC DAGSHAI RECORDING",
+     "CASS RECORDING", "UNKNOWN RECORDING FROM CASSETTE", "New folder",
+     "EVENING $", "MORNING $", "UNKNOWN DATE", "No Date No Time",
+     "export from cassette recording"],
+)
+def test_unrecognized_folders_are_skipped_not_misread(folder):
+    """These carry no date. The contract is that they contribute nothing —
+    never a wrong session_date — and that the omission is warned about."""
+    meta = _sd(f"Dagshai 2003_isolation/06 JUNE - 2003_isolation/{folder}_isolation")
+    assert meta.session_date is None
+    assert meta.session_time is None
+    assert meta.collection == "Dagshai"      # the levels that DO parse survive
+    assert meta.year == 2003
+    assert meta.parse_warnings
+
+
+def test_noon_is_not_a_month():
+    """`[A-Za-z]{3,}` matches 'NOON'; month_num must reject it so the session
+    grammar does not read '12 NOON' as a date."""
+    assert month_num("NOON") is None
+    assert month_num("JUNE") == 6
+    assert month_num("APRIL") == 4
+    assert month_num("Sept") == 9
+    assert month_num("no") is None

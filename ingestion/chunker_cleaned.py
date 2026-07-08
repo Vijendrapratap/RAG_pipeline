@@ -13,8 +13,16 @@ For each ``*.raw.json`` we align the cleaned words back onto the raw segments
 the emitted ``.chunks.json`` is the exact contract bulk_ingest_hardened.py
 already consumes. The only differences from the old chunker are: (1) the chunk
 body holds corrected words, and (2) ``source_file`` is normalized to
-``<stem>.json`` (the ``.raw`` / ``.cleaned`` infix dropped) so re-ingesting a
-track replaces the older, noisier transcript of the same name.
+``<stem>.json`` (the ``.raw`` / ``.cleaned`` infix dropped) so a track keeps one
+stable identity across re-chunks.
+
+Note that a stable ``source_file`` does **not** make re-ingestion idempotent:
+Qdrant point IDs hash the chunk text, and the Tantivy writer is append-only, so
+changing a transcript orphans its old points and duplicates its BM25 documents.
+Re-ingest into a rebuilt index, not on top of a live one.
+
+Cleaned text is trusted only when it is a *cleanup* of the raw transcript, not a
+summary of it — see ``load_cleaned_text``.
 
 Content tags (``cleaned.json.metadata``) are intentionally OUT OF SCOPE here —
 that feeds the Phase 13 enrichment path and is handled separately.
@@ -100,22 +108,86 @@ def output_basename(raw_path: Path, base_dir: Path | None) -> str:
     return f"{safe}.chunks.json"
 
 
-def load_cleaned_text(raw_path: Path) -> str | None:
+# The LLM cleanup pass is instructed to normalize spelling and cut nothing
+# ("DO NOT cut any content" — CLEAN_SYSTEM_PROMPT rule 5). On 877 of 7,413
+# tracks it summarized instead, and the summary was indexed as if it were a
+# verbatim transcript: one 2,689-word discourse survives as 38 words. The
+# upstream runaway detector only trips on *inflation*, so nothing caught it.
+#
+# Legitimate cleaning trims filler — the median track keeps 99% of its words
+# and the 25th percentile keeps 95%. Below 85% the text is being summarized,
+# not cleaned. Falling back to the raw ASR text costs spelling normalization;
+# accepting a summary costs content that no query can ever retrieve. Prefer
+# the noisy-but-complete text.
+MIN_CLEANED_WORD_RATIO = 0.85
+
+# ...except when the raw text is a Whisper repetition loop ("ॐ ॐ ॐ ॐ …"),
+# where a drastically shorter cleaned text is the correct output. Normal Hindi
+# prose repeats far less: the 1st percentile of distinct/total words across the
+# corpus is 0.079, while every degenerate track sits below 0.10.
+DEGENERATE_RAW_DISTINCT_RATIO = 0.10
+
+# Below this the ratio is dominated by rounding — a 12-word invocation losing
+# two filler words is not a summarization event.
+MIN_RAW_WORDS_FOR_RATIO_CHECK = 50
+
+
+def _is_degenerate(words: list[str]) -> bool:
+    """True when the text is a Whisper repetition loop rather than prose."""
+    return bool(words) and len(set(words)) / len(words) < DEGENERATE_RAW_DISTINCT_RATIO
+
+
+def _cleaned_is_lossy(cleaned: str, raw_text: str, name: str) -> bool:
+    """True when the cleanup LLM dropped content instead of normalizing it.
+    Logs the reason with the file name — never silently rejects."""
+    raw_words = raw_text.split()
+    if len(raw_words) < MIN_RAW_WORDS_FOR_RATIO_CHECK:
+        return False
+    ratio = len(cleaned.split()) / len(raw_words)
+    if ratio >= MIN_CLEANED_WORD_RATIO:
+        return False
+    if _is_degenerate(raw_words):
+        log.info("%s: cleaned text is %.0f%% of raw, but raw is a repetition "
+                 "loop - keeping cleaned", name, ratio * 100)
+        return False
+    log.warning("%s: cleaned text is %.0f%% of raw (%d -> %d words) - LLM "
+                "summarized instead of cleaning; falling back to raw text",
+                name, ratio * 100, len(raw_words), len(cleaned.split()))
+    return True
+
+
+def load_cleaned_text(raw_path: Path, raw_text: str | None = None) -> str | None:
     """Find the cleaned transcript for a raw.json. Prefers the sibling
-    .cleaned.txt; falls back to cleaned.json's 'cleaned_text'. Returns None
-    when neither exists (caller decides whether to proceed with raw text)."""
+    .cleaned.txt; falls back to cleaned.json's 'cleaned_text'.
+
+    Returns None when no usable cleaned text exists — either because the files
+    are absent, or because the cleanup LLM summarized the transcript rather
+    than cleaning it (see MIN_CLEANED_WORD_RATIO). The caller then chunks the
+    raw text, which is lossy in spelling but complete in content.
+
+    `raw_text` is the raw ASR transcript. Omit it to skip the loss check.
+    """
     stem = normalized_stem(raw_path)
+    cleaned: str | None = None
+
     txt = raw_path.with_name(f"{stem}.cleaned.txt")
     if txt.exists():
-        return txt.read_text(encoding="utf-8")
-    cj_json = raw_path.with_name(f"{stem}.cleaned.json")
-    if cj_json.exists():
-        data = json.loads(cj_json.read_text(encoding="utf-8"))
-        text = data.get("cleaned_text")
-        if isinstance(text, str) and text.strip():
-            return text
-        log.warning("%s: cleaned.json has no usable 'cleaned_text'", cj_json.name)
-    return None
+        cleaned = txt.read_text(encoding="utf-8")
+    else:
+        cj_json = raw_path.with_name(f"{stem}.cleaned.json")
+        if cj_json.exists():
+            data = json.loads(cj_json.read_text(encoding="utf-8"))
+            text = data.get("cleaned_text")
+            if isinstance(text, str) and text.strip():
+                cleaned = text
+            else:
+                log.warning("%s: cleaned.json has no usable 'cleaned_text'", cj_json.name)
+
+    if cleaned is None or not cleaned.strip():
+        return None
+    if raw_text and _cleaned_is_lossy(cleaned, raw_text, raw_path.name):
+        return None
+    return cleaned
 
 
 def process_file(
@@ -144,9 +216,10 @@ def process_file(
             data = json.load(f)
         segs = cj.normalize_segments(data, FMT)
 
-        cleaned = load_cleaned_text(raw_path)
+        raw_text = data.get("text") or " ".join(s.get("text", "") for s in segs)
+        cleaned = load_cleaned_text(raw_path, raw_text)
         if cleaned is None:
-            log.warning("%s: no cleaned text found — chunking raw text instead",
+            log.warning("%s: no usable cleaned text - chunking raw text instead",
                         raw_path.name)
             aligned = segs
         else:
