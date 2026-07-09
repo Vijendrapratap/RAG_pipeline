@@ -75,6 +75,16 @@ CHARS_PER_TOKEN = 4
 # it risks spilling the KV cache to system RAM, which makes tagging *slower*.
 NUM_CTX = 32_768
 
+# Cap the model's OUTPUT length. The tag JSON is ~10 fields + two short
+# summaries — a well-behaved response is well under 2k tokens. Bounding it
+# stops a runaway repetition loop (observed on refrain-heavy bhajans) from
+# generating until the HTTP read times out, which — with retries — burned
+# ~15 min on a single file during calibration. A truncated response just
+# fails JSON parse and dead-letters fast instead.
+NUM_PREDICT = int(os.environ.get("TAG_NUM_PREDICT", "2048"))
+# Discourage the token-level repetition loops that produce those runaways.
+REPEAT_PENALTY = float(os.environ.get("TAG_REPEAT_PENALTY", "1.1"))
+
 _LOG_FMT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 log = logging.getLogger("enrich_content_tags")
 
@@ -105,22 +115,35 @@ def ollama_generate_json(prompt: str, model: str) -> str:
     `response` EMPTY — every file would then dead-letter as "empty response".
     It is also accepted by non-thinking models, so it is safe regardless of
     which TAG_MODEL is configured. (Mirrors rag_api/pageindex.py.)
+
+    A read timeout is re-raised as a non-retryable RuntimeError: it means the
+    model is stuck generating (a repetition loop on degenerate input), so
+    retrying the identical prompt would just time out again — three times over.
+    Failing fast dead-letters the file after one timeout instead of ~3×.
     """
-    r = requests.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={
-            "model": model,
-            "prompt": prompt,
-            "format": "json",
-            "stream": False,
-            "think": False,
-            "options": {
-                "num_ctx": NUM_CTX,
-                "temperature": 0.0,
+    try:
+        r = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "format": "json",
+                "stream": False,
+                "think": False,
+                "options": {
+                    "num_ctx": NUM_CTX,
+                    "num_predict": NUM_PREDICT,
+                    "temperature": 0.0,
+                    "repeat_penalty": REPEAT_PENALTY,
+                },
             },
-        },
-        timeout=HTTP_TIMEOUT,
-    )
+            timeout=HTTP_TIMEOUT,
+        )
+    except requests.exceptions.ReadTimeout as e:
+        raise RuntimeError(
+            f"ollama read timeout after {HTTP_TIMEOUT}s — model likely stuck "
+            "generating on degenerate input; not retrying"
+        ) from e
     r.raise_for_status()
     data = r.json()
     return data.get("response", "")

@@ -381,6 +381,45 @@ def test_ollama_generate_json_sends_think_false(monkeypatch) -> None:
     assert captured["body"]["stream"] is False
 
 
+def test_ollama_generate_json_bounds_generation(monkeypatch) -> None:
+    """num_predict + repeat_penalty must be sent so a runaway repetition loop
+    can't generate until the HTTP read times out (burned ~15 min/file in calib)."""
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"response": "{}"}
+
+    def _fake_post(url, json, timeout):  # noqa: A002
+        captured["body"] = json
+        return _Resp()
+
+    monkeypatch.setattr(enrich.requests, "post", _fake_post)
+    enrich.ollama_generate_json("p", "qwen3.5:9b")
+
+    opts = captured["body"]["options"]
+    assert opts["num_predict"] == enrich.NUM_PREDICT
+    assert opts["repeat_penalty"] == enrich.REPEAT_PENALTY
+
+
+def test_read_timeout_is_not_retried(monkeypatch) -> None:
+    """A read timeout means the model is stuck — retrying the identical prompt
+    just times out again. Must fail after exactly ONE attempt, not max_tries."""
+    calls = {"n": 0}
+
+    def _timeout_post(url, json, timeout):  # noqa: A002
+        calls["n"] += 1
+        raise enrich.requests.exceptions.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(enrich.requests, "post", _timeout_post)
+    with pytest.raises(RuntimeError, match="stuck generating"):
+        enrich.ollama_generate_json("prompt", "qwen3.5:9b")
+    assert calls["n"] == 1  # NOT retried 3x
+
+
 def test_qdrant_set_payload_uses_points_kwarg_with_filter() -> None:
     """Regression: qdrant-client 1.18 has NO `points_selector` kwarg — the
     selector arg is `points` (a Filter is accepted). The old name raised
