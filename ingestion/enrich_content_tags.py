@@ -17,6 +17,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -121,10 +122,13 @@ def ollama_generate_json(prompt: str, model: str) -> str:
 
 def dead_letter(source_file: str, raw: str, reason: str) -> Path:
     """Persist a bad tagging attempt for later forensics. Returns dst path."""
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in source_file)[:120]
+    # Slug for readability, plus a hash of the FULL source_file so two long
+    # paths that share a 100-char prefix don't overwrite each other's artifact.
+    slug = "".join(c if c.isalnum() or c in "-_." else "_" for c in source_file)[:100]
+    digest = hashlib.sha1(source_file.encode("utf-8")).hexdigest()[:12]
     target_dir = DEAD_LETTER_DIR / "tag_failures"
     target_dir.mkdir(parents=True, exist_ok=True)
-    dst = target_dir / f"{safe}.txt"
+    dst = target_dir / f"{slug}.{digest}.txt"
     try:
         dst.write_text(
             f"source_file: {source_file}\nreason: {reason}\n\n--- raw response ---\n{raw}\n",
@@ -338,21 +342,37 @@ def process_one_file(
         else:
             tags, raw, err = tag_transcript_mapreduce(transcript, model)
     except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        # A transport error escaped the retry decorator (reraise=True). Persist
+        # a forensic artifact — otherwise the only trace is a reason string and
+        # the raw failure is lost (CLAUDE.md rule 6). tagged_at stays NULL → the
+        # file is retried on the next run.
+        reason = f"{type(e).__name__}: {e}"
+        dst = dead_letter(source_file, traceback.format_exc(), f"tagging call raised: {reason}")
+        log.error("%s: tagging call raised after retries (%s) — dead-letter %s",
+                  source_file, reason, dst)
+        return False, reason
 
     if tags is None:
         dst = dead_letter(source_file, raw, err or "validation failed")
         log.error("%s: tagging failed (%s) — dead-letter %s", source_file, err, dst)
         return False, err
 
-    store.write_tags(source_file, tags, model)
+    # --- Durability: propagate to Qdrant BEFORE marking the file tagged. ---
+    # Resume selects `WHERE tagged_at IS NULL`. If we committed tagged_at first
+    # and propagation then failed (a Qdrant restart over a multi-day run is not
+    # hypothetical), this file's content-tag payloads would be stranded forever.
+    # Ordering propagate-then-commit means a transient Qdrant outage just leaves
+    # the file NULL → retried next run. set_payload is idempotent (filtered by
+    # source_file), so a crash between propagate and commit re-runs both safely.
     try:
         qdrant_set_payload_for_file(qclient, source_file, tags)
     except Exception as e:
-        # Postgres write already committed; surface the propagation failure
-        # but don't treat as fatal — search will still work, just without
-        # content-tag filters for this file until we re-run propagation.
-        log.error("%s: qdrant set_payload failed: %s", source_file, e)
+        log.error("%s: qdrant propagation failed after retries — leaving "
+                  "tagged_at NULL for retry: %s\n%s",
+                  source_file, e, traceback.format_exc())
+        return False, f"qdrant propagation failed: {e}"
+
+    store.write_tags(source_file, tags, model)
 
     elapsed = time.monotonic() - t0
     log.info(

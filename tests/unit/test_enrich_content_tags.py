@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from ingestion import enrich_content_tags as enrich
 from ingestion.utils.tag_schema import (
     ALLOWED_EVENT_TYPES,
     ALLOWED_LANGUAGES,
@@ -237,3 +238,114 @@ def test_full_pipeline_dead_letters_validation_failure() -> None:
     ok, errs = validate_tags(obj)
     assert not ok
     assert errs  # at least one validation error
+
+
+# ---- 2.0 durability: dead-letter filenames ------------------------------
+
+
+def test_dead_letter_long_paths_do_not_collide(tmp_path, monkeypatch) -> None:
+    """Two source_files sharing a >100-char prefix must not overwrite each
+    other's forensic artifact (the old [:120] slug truncation did)."""
+    monkeypatch.setattr(enrich, "DEAD_LETTER_DIR", tmp_path)
+    prefix = "Live Masters 2010/" + "A" * 150
+    a = prefix + "/one.json"
+    b = prefix + "/two.json"
+    dst_a = enrich.dead_letter(a, "raw-a", "reason-a")
+    dst_b = enrich.dead_letter(b, "raw-b", "reason-b")
+    assert dst_a != dst_b
+    assert dst_a.exists() and dst_b.exists()
+    assert "reason-a" in dst_a.read_text(encoding="utf-8")
+    assert "reason-b" in dst_b.read_text(encoding="utf-8")
+
+
+# ---- 2.0 durability: process_one_file ordering & failure handling -------
+
+
+class _FakeStore:
+    """Records write_tags / load_transcript calls without touching Postgres."""
+
+    def __init__(self, transcript: str = "a short transcript body", calls=None) -> None:
+        self._transcript = transcript
+        self.write_calls: list[tuple] = []
+        self._order = calls  # optional shared call-order log
+
+    def load_transcript(self, source_file: str) -> str:
+        return self._transcript
+
+    def write_tags(self, source_file: str, tags: dict, model: str) -> None:
+        self.write_calls.append((source_file, model))
+        if self._order is not None:
+            self._order.append("commit")
+
+
+def test_process_one_file_dead_letters_escaped_transport_exception(tmp_path, monkeypatch) -> None:
+    """A transport error that escapes the retry decorator must produce a
+    dead-letter artifact and leave the file untagged (write_tags not called)."""
+    monkeypatch.setattr(enrich, "DEAD_LETTER_DIR", tmp_path)
+
+    def _boom(transcript, model):
+        raise enrich.requests.ConnectionError("qdrant/ollama down")
+
+    monkeypatch.setattr(enrich, "tag_transcript_single_pass", _boom)
+    store = _FakeStore()
+
+    ok, reason = enrich.process_one_file(
+        "Some/File.json", store, qclient=object(), model="qwen3.5:9b",
+        max_tokens_single_pass=28_000, dry_run=False,
+    )
+
+    assert ok is False
+    assert "ConnectionError" in reason
+    assert store.write_calls == []  # never marked tagged
+    artifacts = list((tmp_path / "tag_failures").glob("*.txt"))
+    assert len(artifacts) == 1
+    assert "tagging call raised" in artifacts[0].read_text(encoding="utf-8")
+
+
+def test_process_one_file_leaves_untagged_when_propagation_fails(tmp_path, monkeypatch) -> None:
+    """Propagate-then-commit: if Qdrant set_payload fails, tagged_at must NOT
+    be committed, so resume (WHERE tagged_at IS NULL) retries the file."""
+    monkeypatch.setattr(enrich, "DEAD_LETTER_DIR", tmp_path)
+    monkeypatch.setattr(
+        enrich, "tag_transcript_single_pass",
+        lambda transcript, model: (_valid_tags(), "{}", None),
+    )
+
+    def _boom(qclient, source_file, tags):
+        raise RuntimeError("qdrant restarted mid-run")
+
+    monkeypatch.setattr(enrich, "qdrant_set_payload_for_file", _boom)
+    store = _FakeStore()
+
+    ok, reason = enrich.process_one_file(
+        "Some/File.json", store, qclient=object(), model="qwen3.5:9b",
+        max_tokens_single_pass=28_000, dry_run=False,
+    )
+
+    assert ok is False
+    assert "qdrant propagation failed" in reason
+    assert store.write_calls == []  # crucial: NOT marked tagged
+
+
+def test_process_one_file_propagates_before_committing(tmp_path, monkeypatch) -> None:
+    """Happy path: propagation must run BEFORE the Postgres tagged_at commit."""
+    monkeypatch.setattr(enrich, "DEAD_LETTER_DIR", tmp_path)
+    order: list[str] = []
+    monkeypatch.setattr(
+        enrich, "tag_transcript_single_pass",
+        lambda transcript, model: (_valid_tags(), "{}", None),
+    )
+    monkeypatch.setattr(
+        enrich, "qdrant_set_payload_for_file",
+        lambda qclient, source_file, tags: order.append("propagate"),
+    )
+    store = _FakeStore(calls=order)
+
+    ok, reason = enrich.process_one_file(
+        "Some/File.json", store, qclient=object(), model="qwen3.5:9b",
+        max_tokens_single_pass=28_000, dry_run=False,
+    )
+
+    assert ok is True and reason is None
+    assert order == ["propagate", "commit"]
+    assert store.write_calls == [("Some/File.json", "qwen3.5:9b")]
