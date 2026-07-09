@@ -1,4 +1,4 @@
-"""Per-file content-tag enrichment via Qwen 2.5 7B (Ollama). PRD §6 Phase 13.
+"""Per-file content-tag enrichment via Qwen 3.5 9B (Ollama). PRD §6 Phase 13.
 
 Runs AFTER bulk_ingest_hardened.py. Selects files with `tagged_at IS NULL`
 from file_meta, reconstructs the transcript from chunk_meta rows, calls
@@ -12,7 +12,7 @@ with the raw model response. The Phase 12 path metadata is untouched.
 CLI:
     python -m ingestion.enrich_content_tags \\
         [--limit N] [--retry-failed] [--dry-run] \\
-        [--model qwen2.5:7b] [--max-tokens-single-pass 28000]
+        [--model qwen3.5:9b] [--max-tokens-single-pass 28000]
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
 
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-TAG_MODEL = os.environ.get("TAG_MODEL", "qwen2.5:7b")
+TAG_MODEL = os.environ.get("TAG_MODEL", "qwen3.5:9b")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 QDRANT_KEY = os.environ.get("QDRANT_API_KEY", "")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "transcripts")
@@ -71,7 +71,8 @@ DEFAULT_MAX_TOKENS_SINGLE_PASS = 28_000
 CHARS_PER_TOKEN = 4
 
 # Ollama num_ctx for the tagging call. Has to be ≥ prompt+output tokens.
-# 32768 is a safe ceiling for Qwen 2.5 7B q4_K_M on a 12 GB GPU.
+# 32768 is comfortable for qwen3.5:9b q4 on the RTX 5090 (32 GB VRAM); raising
+# it risks spilling the KV cache to system RAM, which makes tagging *slower*.
 NUM_CTX = 32_768
 
 _LOG_FMT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -97,7 +98,14 @@ def setup_logging() -> None:
 
 @retry_with_backoff(max_tries=3, base=2.0, max_delay=120.0)
 def ollama_generate_json(prompt: str, model: str) -> str:
-    """POST to /api/generate with format=json. Returns raw response text."""
+    """POST to /api/generate with format=json. Returns raw response text.
+
+    `think=False` is mandatory: qwen3.5:9b is a thinking model, and with
+    format=json its output routes into the `thinking` field, leaving
+    `response` EMPTY — every file would then dead-letter as "empty response".
+    It is also accepted by non-thinking models, so it is safe regardless of
+    which TAG_MODEL is configured. (Mirrors rag_api/pageindex.py.)
+    """
     r = requests.post(
         f"{OLLAMA_URL}/api/generate",
         json={
@@ -105,6 +113,7 @@ def ollama_generate_json(prompt: str, model: str) -> str:
             "prompt": prompt,
             "format": "json",
             "stream": False,
+            "think": False,
             "options": {
                 "num_ctx": NUM_CTX,
                 "temperature": 0.0,
@@ -385,7 +394,7 @@ def process_one_file(
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Per-file content tagging via Qwen 2.5 7B.")
+    p = argparse.ArgumentParser(description="Per-file content tagging via Qwen 3.5 9B.")
     p.add_argument("--limit", type=int, default=None,
                    help="Tag at most N files this run.")
     p.add_argument("--retry-failed", action="store_true",

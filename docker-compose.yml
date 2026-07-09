@@ -72,6 +72,9 @@ services:
       # Reasoning toggle: "off" disables the thinking model's hidden <think>
       # chain for much faster replies; "auto" (default) keeps it. See .env.
       CHAT_THINK: "${CHAT_THINK:-auto}"
+      # TAG_MODEL: Ollama model for the offline Phase 13 enrichment pass
+      # (ingestion.enrich_content_tags). That CLI forces think=false itself.
+      TAG_MODEL: "${TAG_MODEL:-qwen3.5:9b}"
       # OpenRouter path — only read when CHAT_PROVIDER=openrouter. Empty key
       # is fine when running in local mode; populate it in `.env` to enable.
       OPENROUTER_URL: "${OPENROUTER_URL:-https://openrouter.ai/api/v1}"

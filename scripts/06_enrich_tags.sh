@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Phase 13 — per-file content tagging via Qwen 2.5 7B (Ollama).
+# Phase 13 — per-file content tagging via Qwen 3.5 9B (Ollama).
 # Runs AFTER bulk_ingest_hardened.py. Resumable: re-runs skip files
 # already tagged (file_meta.tagged_at IS NOT NULL).
 #
@@ -9,7 +9,7 @@ set -euo pipefail
 #   scripts/06_enrich_tags.sh                  # tag all untagged files
 #   scripts/06_enrich_tags.sh --limit 10       # tag at most 10 files
 #   scripts/06_enrich_tags.sh --dry-run        # show what would be tagged
-#   scripts/06_enrich_tags.sh --model qwen2.5:14b  # override model
+#   scripts/06_enrich_tags.sh --model qwen3.5:27b  # override model
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"

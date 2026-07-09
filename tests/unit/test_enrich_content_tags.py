@@ -349,3 +349,46 @@ def test_process_one_file_propagates_before_committing(tmp_path, monkeypatch) ->
     assert ok is True and reason is None
     assert order == ["propagate", "commit"]
     assert store.write_calls == [("Some/File.json", "qwen3.5:9b")]
+
+
+# ---- 2.1 unblock: think=false + installed model default -----------------
+
+
+def test_ollama_generate_json_sends_think_false(monkeypatch) -> None:
+    """qwen3.5:9b is a thinking model. With format=json and thinking ON, the
+    output routes into `thinking` and `response` is EMPTY → every file would
+    dead-letter as 'empty response'. The tagging call MUST send think=false."""
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"response": '{"ok": true}'}
+
+    def _fake_post(url, json, timeout):  # noqa: A002 - matches requests.post kwarg
+        captured["url"] = url
+        captured["body"] = json
+        return _Resp()
+
+    monkeypatch.setattr(enrich.requests, "post", _fake_post)
+    out = enrich.ollama_generate_json("some prompt", "qwen3.5:9b")
+
+    assert out == '{"ok": true}'
+    assert captured["body"]["think"] is False
+    assert captured["body"]["format"] == "json"
+    assert captured["body"]["stream"] is False
+
+
+def test_tag_model_default_is_installed_model(monkeypatch) -> None:
+    """Guard against regressing to the uninstalled qwen2.5:7b default that made
+    every enrichment run dead-letter with an empty/absent-model response."""
+    import importlib
+
+    monkeypatch.delenv("TAG_MODEL", raising=False)
+    reloaded = importlib.reload(enrich)
+    try:
+        assert reloaded.TAG_MODEL == "qwen3.5:9b"
+    finally:
+        importlib.reload(enrich)  # restore module state for later tests
