@@ -106,39 +106,59 @@ def build_qdrant_filter(filters: dict[str, Any]) -> dict[str, Any] | None:
     return {"must": must} if must else None
 
 
+def _rrf_accumulate(
+    scored: dict[str, list[Any]],
+    hits: list[dict[str, Any]],
+    weight: float,
+    id_key: str,
+    payload_fn: Any,
+    k: int,
+) -> None:
+    """Add one ranked list's RRF contribution (weight/(k+rank+1)) into `scored`."""
+    for rank, h in enumerate(hits):
+        cid = str(h[id_key])
+        entry = scored.setdefault(cid, [0.0, None])
+        entry[0] += weight / (k + rank + 1)
+        if entry[1] is None:
+            entry[1] = payload_fn(h)
+
+
 def rrf_fuse(
     dense_hits: list[dict[str, Any]],
     bm25_hits: list[dict[str, Any]],
     bm25_weight: float,
     k: int = 60,
+    catalog_hits: list[dict[str, Any]] | None = None,
+    catalog_weight: float | None = None,
 ) -> list[tuple[str, float, dict[str, Any]]]:
-    """Weighted reciprocal rank fusion.
+    """Weighted reciprocal rank fusion over N ranked lists.
 
     Returns [(chunk_id, fused_score, payload), ...] sorted by score desc.
     Dense hits keep their Qdrant payload; BM25-only hits get a payload-shaped
     dict synthesised from the Tantivy doc so downstream code is uniform.
+
+    The optional catalog arm is fused **by rank**, not by raw cosine: a catalog
+    row scores ``catalog_weight/(k+rank+1)`` on the same scale as every other
+    arm. Concatenating its raw cosine (~0.5–0.95) into an RRF list (max ~1/61 ≈
+    0.016) instead let a single catalog row outweigh — or, after positional
+    truncation, be dropped ahead of — the entire transcript fusion. Its default
+    weight matches the dense arm (it is a semantic/dense source).
     """
     scored: dict[str, list[Any]] = {}
-
-    for rank, h in enumerate(dense_hits):
-        cid = str(h["id"])
-        entry = scored.setdefault(cid, [0.0, None])
-        entry[0] += (1 - bm25_weight) / (k + rank + 1)
-        if entry[1] is None:
-            entry[1] = h.get("payload") or {}
-
-    for rank, h in enumerate(bm25_hits):
-        cid = str(h["chunk_id"])
-        entry = scored.setdefault(cid, [0.0, None])
-        entry[0] += bm25_weight / (k + rank + 1)
-        if entry[1] is None:
-            entry[1] = {
-                "text": h.get("text", ""),
-                "source_file": h.get("source_file", ""),
-                "speakers": [],
-                "start_sec": None,
-                "end_sec": None,
-            }
+    _rrf_accumulate(scored, dense_hits, 1 - bm25_weight, "id",
+                    lambda h: h.get("payload") or {}, k)
+    _rrf_accumulate(scored, bm25_hits, bm25_weight, "chunk_id",
+                    lambda h: {
+                        "text": h.get("text", ""),
+                        "source_file": h.get("source_file", ""),
+                        "speakers": [],
+                        "start_sec": None,
+                        "end_sec": None,
+                    }, k)
+    if catalog_hits:
+        cw = (1 - bm25_weight) if catalog_weight is None else catalog_weight
+        _rrf_accumulate(scored, catalog_hits, cw, "id",
+                        lambda h: h.get("payload") or {}, k)
 
     merged = [(cid, float(s), pl or {}) for cid, (s, pl) in scored.items()]
     merged.sort(key=lambda x: x[1], reverse=True)
@@ -645,14 +665,11 @@ class Retriever:
         vec = self._query_vector(query, dense_text)
         dense = self._dense(vec, filters)
         bm25 = self._bm25(query)
-        fused = rrf_fuse(dense, bm25, weight)
-
-        if include_catalog:
-            cat = self._catalog_dense(vec, filters)
-            fused = fused + [
-                (str(h["id"]), float(h.get("score", 0.0)), dict(h.get("payload") or {}))
-                for h in cat
-            ]
+        cat = self._catalog_dense(vec, filters) if include_catalog else None
+        # Fuse the catalog arm by rank (see rrf_fuse) so it competes on the RRF
+        # scale and survives the positional truncation below, then re-sort is
+        # done inside rrf_fuse.
+        fused = rrf_fuse(dense, bm25, weight, catalog_hits=cat)
 
         if any(v for v in filters.values()):
             fused = apply_post_filters(fused, filters)

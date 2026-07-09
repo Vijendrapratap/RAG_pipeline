@@ -111,6 +111,33 @@ def test_rrf_fuse_bm25_only_hit_gets_synthetic_payload():
     assert payload["speakers"] == []
 
 
+# ---- 1.6: catalog arm fused by rank --------------------------------------
+
+def test_rrf_fuse_catalog_arm_survives_when_transcript_arms_disjoint():
+    # Transcript dense/bm25 arms are DISJOINT (no shared ids); a catalog row is
+    # present. Fused by rank it competes on the RRF scale and appears in the
+    # output — where before it was appended with a raw cosine and truncated away.
+    dense = [{"id": f"d{i}", "score": 0.9, "payload": {"text": "d"}} for i in range(5)]
+    bm25 = [{"chunk_id": f"b{i}", "text": "b", "source_file": "f.json", "score": 5.0}
+            for i in range(5)]
+    cat = [{"id": "cat1", "score": 0.92,
+            "payload": {"source_type": "catalog", "text": "song"}}]
+    fused = rrf_fuse(dense, bm25, bm25_weight=0.65, catalog_hits=cat)
+    ids = [cid for cid, _, _ in fused]
+    assert "cat1" in ids
+    # A rank-0 catalog row scores exactly like a rank-0 dense row (same weight,
+    # same rank) — i.e. on the RRF scale, not a ~50x-larger raw cosine.
+    cat_score = next(s for cid, s, _ in fused if cid == "cat1")
+    d0_score = next(s for cid, s, _ in fused if cid == "d0")
+    assert cat_score == d0_score
+
+
+def test_rrf_fuse_no_catalog_arm_is_backward_compatible():
+    dense = [{"id": "a", "score": 0.9, "payload": {}}]
+    bm25 = [{"chunk_id": "b", "text": "t", "source_file": "f", "score": 1.0}]
+    assert rrf_fuse(dense, bm25, 0.65) == rrf_fuse(dense, bm25, 0.65, catalog_hits=None)
+
+
 # ---- apply_post_filters --------------------------------------------------
 
 
