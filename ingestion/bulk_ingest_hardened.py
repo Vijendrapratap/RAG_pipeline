@@ -75,6 +75,7 @@ PROGRESS_EVERY = 50  # PRD #16
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-m3")
+EMBED_DIM = 1024  # bge-m3 dense dimension; a vector of any other length is corrupt
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 QDRANT_KEY = os.environ.get("QDRANT_API_KEY", "")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "transcripts")
@@ -155,6 +156,26 @@ def qdrant_upsert(client: QdrantClient, points: list[PointStruct]) -> None:
 
 def vec_is_finite(vec: list[float]) -> bool:
     return not any(math.isnan(x) or math.isinf(x) for x in vec)
+
+
+def dead_letter_chunk(source_file: str, chunk_id: str, reason: str,
+                      text: str) -> None:
+    """Record a single dropped chunk as a durable artifact.
+
+    A chunk skipped from Qdrant/Postgres/BM25 (bad embedding) must never vanish
+    silently (CLAUDE.md rule 6). Appends one JSON line to
+    ``DEAD_LETTER_DIR/bad_chunks/bad_chunks.jsonl``; dead-lettering itself never
+    raises into the ingest loop.
+    """
+    try:
+        d = DEAD_LETTER_DIR / "bad_chunks"
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {"source_file": source_file, "chunk_id": chunk_id,
+               "reason": reason, "head": (text or "")[:200].replace("\n", " ")}
+        with (d / "bad_chunks.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001 - report, never crash the ingest
+        log.error("could not dead-letter chunk %s (%s): %s", chunk_id, reason, e)
 
 
 # ---- Postgres writer (PRD #14, guarded; activates after Phase 6) -------
@@ -312,6 +333,15 @@ class TantivyWriter:
         doc.add_text("text", text)
         doc.add_text("source_file", source_file)
         self.writer.add_document(doc)
+
+    def delete_documents(self, source_file: str) -> None:
+        """Mark every BM25 doc for ``source_file`` for deletion (needs a
+        subsequent ``commit()`` to take effect). ``source_file`` is a ``raw``-
+        tokenized field, so this is an exact term match — the delete path
+        ``reindex_file.py`` uses so a re-chunk does not orphan BM25 docs."""
+        if not self.enabled or self.writer is None:
+            return
+        self.writer.delete_documents("source_file", source_file)
 
     def commit(self) -> None:
         if not self.enabled or self.writer is None:
@@ -488,9 +518,15 @@ def process_file(
         points: list[PointStruct] = []
         pg_rows: list[tuple[Any, ...]] = []
         for cid, vec, chunk in zip(ids, vectors, batch):
-            if not vec_is_finite(vec):
-                log.error("%s: NaN/Inf in embedding for chunk %s — skipping",
-                          chunks_path.name, cid)
+            # Guard the embedding before it fans out to three stores. A NaN/Inf
+            # or wrong-dimension vector is corrupt; drop it from ALL stores and
+            # dead-letter it (never silently, never desynced).
+            if not vec_is_finite(vec) or len(vec) != EMBED_DIM:
+                reason = ("nonfinite_embedding" if not vec_is_finite(vec)
+                          else f"bad_embedding_dim_{len(vec)}_expected_{EMBED_DIM}")
+                log.error("%s: %s for chunk %s — skipping (dead-lettered)",
+                          chunks_path.name, reason, cid)
+                dead_letter_chunk(source_file, cid, reason, chunk["text"])
                 continue
             payload = _coerce_payload(chunk, source_file)
             points.append(PointStruct(id=cid, vector=vec, payload=payload))
@@ -508,8 +544,11 @@ def process_file(
 
         if points:
             qdrant_upsert(qdrant_client, points)
-            for cid, chunk in zip(ids, batch):
-                tantivy_writer.add(cid, chunk["text"], source_file)
+            # Index into BM25 the SAME filtered set upserted to Qdrant — iterate
+            # `points`, not zip(ids, batch), or a chunk dropped above (bad vector)
+            # would still land in Tantivy and desync BM25 from the vector store.
+            for p in points:
+                tantivy_writer.add(p.id, p.payload["text"], source_file)
             pg_writer.write_batch(pg_rows)
             total += len(points)
 

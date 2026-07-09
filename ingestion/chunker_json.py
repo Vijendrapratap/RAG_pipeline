@@ -21,12 +21,20 @@ import traceback
 from pathlib import Path
 from typing import Any, Iterable
 
+from ingestion.chunker_text import split_sentences
 from ingestion.utils.path_parser import PRIMARY_SPEAKER, PathMetadata, parse_path
 
 TARGET_TOKENS = 450
 MAX_TOKENS = 700
 MIN_TOKENS = 200
 MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
+
+# Chunk-quality guards (Stage 1.2). An ASR loop is Whisper repeating one phrase
+# for thousands of words; its unique-word ratio collapses. Drop such chunks (they
+# are noise and poison enrichment), never silently. A minimum word count keeps a
+# legitimately short, naturally-repetitive chunk from being flagged.
+LOOP_UNIQ_RATIO = 0.15
+MIN_LOOP_WORDS = 50
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,18 +94,22 @@ def normalize_segments(data: Any, fmt: str) -> list[dict[str, Any]]:
     return out
 
 
-def _flush(
+def uniq_word_ratio(text: str) -> tuple[int, float]:
+    """(word_count, unique/total). Empty text => (0, 1.0) so it never flags."""
+    words = text.split()
+    if not words:
+        return 0, 1.0
+    return len(words), len(set(words)) / len(words)
+
+
+def _render_chunk(
+    body: str,
     buf: list[dict[str, Any]],
     source_name: str,
     fmt: str,
-    path_meta: PathMetadata | None = None,
-) -> dict[str, Any] | None:
-    """Materialize one chunk from buffered segments. Returns None if empty."""
-    if not buf:
-        return None
-    text_body = " ".join(s["text"] for s in buf).strip()
-    if not text_body:
-        return None
+    path_meta: PathMetadata | None,
+) -> dict[str, Any]:
+    """Build one chunk dict for `body`, deriving timing/speakers from `buf`."""
     starts = [s["start"] for s in buf if s["start"] is not None]
     ends = [s["end"] for s in buf if s["end"] is not None]
     speakers = sorted({s["speaker"] for s in buf if s["speaker"]})
@@ -115,7 +127,7 @@ def _flush(
     )
     extra = path_meta.header_fragment() if path_meta else ""
     header = f"[{extra}]\n{base}" if extra else base
-    full_text = f"{header}\n{text_body}"
+    full_text = f"{header}\n{body}"
     chunk: dict[str, Any] = {
         "text": full_text,
         "source_file": source_name,
@@ -124,11 +136,78 @@ def _flush(
         "speakers": speakers,
         "format": fmt,
         "has_timestamps": True,
-        "word_count": len(text_body.split()),
+        "word_count": len(body.split()),
     }
     if path_meta is not None:
         chunk["path_metadata"] = path_meta.to_payload()
     return chunk
+
+
+def _subdivide_body(body: str, source_name: str) -> list[str]:
+    """Split an oversize body into <= MAX_TOKENS pieces on sentence boundaries
+    (danda-aware via ``split_sentences``). Raises ``ValueError`` if a single
+    sentence still exceeds MAX_TOKENS — never truncate silently; the file
+    dead-letters loudly instead (caught by ``process_file``)."""
+    pieces: list[str] = []
+    cur: list[str] = []
+    cur_tok = 0
+    for sent in split_sentences(body):
+        s_tok = estimate_tokens(sent)
+        if s_tok > MAX_TOKENS:
+            raise ValueError(
+                f"{source_name}: a single sentence of ~{s_tok} est-tokens "
+                f"exceeds MAX_TOKENS={MAX_TOKENS} and cannot be split on "
+                f"sentence boundaries (likely no punctuation / an ASR artifact)"
+            )
+        if cur and cur_tok + s_tok > MAX_TOKENS:
+            pieces.append(" ".join(cur))
+            cur, cur_tok = [], 0
+        cur.append(sent)
+        cur_tok += s_tok
+    if cur:
+        pieces.append(" ".join(cur))
+    return pieces or [body]
+
+
+def _emit_guarded(
+    chunks: list[dict[str, Any]],
+    buf: list[dict[str, Any]],
+    source_name: str,
+    fmt: str,
+    path_meta: PathMetadata | None,
+    dead_letters: list[dict[str, Any]] | None,
+) -> None:
+    """Materialize guarded chunk(s) from `buf` and append to `chunks`:
+
+    * **Degenerate ASR loop** — drop a chunk whose unique-word ratio is below
+      ``LOOP_UNIQ_RATIO`` (with >= ``MIN_LOOP_WORDS`` words) and record a
+      chunk-level dead-letter. Never silently.
+    * **Oversize** — subdivide a chunk exceeding ``MAX_TOKENS`` into sentence-
+      packed pieces (each <= MAX_TOKENS), so no chunk overruns bge-m3's context.
+    """
+    if not buf:
+        return
+    body = " ".join(s["text"] for s in buf).strip()
+    if not body:
+        return
+    wc, ratio = uniq_word_ratio(body)
+    if wc >= MIN_LOOP_WORDS and ratio < LOOP_UNIQ_RATIO:
+        start = next((s["start"] for s in buf if s["start"] is not None), None)
+        log.warning(
+            "%s: dropping degenerate ASR-loop chunk (start=%s uniq_ratio=%.4f "
+            "words=%d) — not embedded", source_name, start, ratio, wc)
+        if dead_letters is not None:
+            dead_letters.append({
+                "source_file": source_name, "start_sec": start,
+                "reason": f"asr_loop uniq_ratio={round(ratio, 4)} words={wc}",
+                "head": body[:200].replace("\n", " "),
+            })
+        return
+    if estimate_tokens(body) > MAX_TOKENS:
+        for piece in _subdivide_body(body, source_name):
+            chunks.append(_render_chunk(piece, buf, source_name, fmt, path_meta))
+        return
+    chunks.append(_render_chunk(body, buf, source_name, fmt, path_meta))
 
 
 def chunk_segments(
@@ -136,8 +215,15 @@ def chunk_segments(
     source_name: str,
     fmt: str,
     path_meta: PathMetadata | None = None,
+    dead_letters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Walk segments, flushing on size/speaker boundaries per PRD spec."""
+    """Walk segments, flushing on size/speaker boundaries per PRD spec.
+
+    Every emitted chunk passes through ``_emit_guarded`` (Stage 1.2): degenerate
+    ASR-loop chunks are dropped to ``dead_letters`` (never silently) and oversize
+    chunks are subdivided to <= MAX_TOKENS. Pass a list for ``dead_letters`` to
+    capture dropped-chunk records; omit it and drops are still logged.
+    """
     chunks: list[dict[str, Any]] = []
     buf: list[dict[str, Any]] = []
     buf_tokens = 0
@@ -150,9 +236,7 @@ def chunk_segments(
         # Hard cap: flush before adding if this segment would push past MAX
         # and we already have at least MIN tokens accumulated.
         if buf_tokens + seg_tokens > MAX_TOKENS and buf_tokens >= MIN_TOKENS:
-            chunk = _flush(buf, source_name, fmt, path_meta)
-            if chunk:
-                chunks.append(chunk)
+            _emit_guarded(chunks, buf, source_name, fmt, path_meta, dead_letters)
             buf = []
             buf_tokens = 0
             buf_speakers = set()
@@ -167,9 +251,7 @@ def chunk_segments(
             and buf_speakers
             and spk not in buf_speakers
         ):
-            chunk = _flush(buf, source_name, fmt, path_meta)
-            if chunk:
-                chunks.append(chunk)
+            _emit_guarded(chunks, buf, source_name, fmt, path_meta, dead_letters)
             buf = []
             buf_tokens = 0
             buf_speakers = set()
@@ -179,11 +261,10 @@ def chunk_segments(
         if spk:
             buf_speakers.add(spk)
 
-        # Pathological single segment > MAX_TOKENS: emit on its own.
+        # Pathological single segment > MAX_TOKENS: emit on its own (the guard
+        # subdivides it, or drops it if it is a degenerate loop).
         if buf_tokens >= MAX_TOKENS:
-            chunk = _flush(buf, source_name, fmt, path_meta)
-            if chunk:
-                chunks.append(chunk)
+            _emit_guarded(chunks, buf, source_name, fmt, path_meta, dead_letters)
             buf = []
             buf_tokens = 0
             buf_speakers = set()
@@ -191,9 +272,7 @@ def chunk_segments(
     # Tail flush — emit whatever remains even if below MIN; better to keep
     # the trailing content than drop it. Must propagate path_meta or short
     # single-chunk files would lose their event/date/track metadata.
-    chunk = _flush(buf, source_name, fmt, path_meta)
-    if chunk:
-        chunks.append(chunk)
+    _emit_guarded(chunks, buf, source_name, fmt, path_meta, dead_letters)
     return chunks
 
 
@@ -237,10 +316,18 @@ def process_file(
             data = json.load(f)
         segs = normalize_segments(data, fmt)
         path_meta = _path_meta_for(in_path, base_dir)
-        chunks = chunk_segments(segs, in_path.name, fmt, path_meta)
+        dead_letters: list[dict[str, Any]] = []
+        chunks = chunk_segments(segs, in_path.name, fmt, path_meta, dead_letters)
         with out_path.open("w", encoding="utf-8") as f:
             json.dump({"source_file": in_path.name, "format": fmt, "chunks": chunks},
                       f, ensure_ascii=False, indent=2)
+        if dead_letters:
+            failed_dir.mkdir(parents=True, exist_ok=True)
+            dl_path = failed_dir / f"{in_path.name}.dropped_chunks.json"
+            dl_path.write_text(json.dumps(dead_letters, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+            log.warning("%s: dropped %d degenerate ASR-loop chunk(s) -> %s",
+                        in_path.name, len(dead_letters), dl_path.name)
         log.info("%s -> %s (%d chunks)", in_path.name, out_path.name, len(chunks))
         return len(chunks), "ok"
     except Exception as e:

@@ -70,23 +70,23 @@ def test_single_short_utterance_one_chunk():
     assert chunks[0]["has_timestamps"] is True
 
 
-def test_long_monologue_multiple_chunks():
-    # Build ~1500-word monologue (~1950 tokens). Should yield >=2 chunks
-    # since MAX_TOKENS=700.
-    long_text = " ".join(["word"] * 1500)
+def test_long_monologue_split_within_single_segment():
+    # A single oversize segment of DISTINCT (non-loop) sentences. Pre-1.2 this
+    # emitted as one giant chunk; 1.2 subdivides it on sentence boundaries into
+    # multiple chunks, each within MAX_TOKENS. Assert on word_count (the real
+    # body length) so the check doesn't depend on the header layout.
+    long_text = ". ".join(" ".join(f"word{i}_{k}" for k in range(6)) for i in range(300))
     segs = [{"text": long_text, "start": 0.0, "end": 600.0, "speaker": "A"}]
     chunks = cj.chunk_segments(segs, "long.json", "whisperx")
-    # Single segment of >MAX tokens emits as one chunk (we can't split inside
-    # a single segment without word-level timing). That's expected behavior:
-    # the segment IS the atomic unit. Verify it emits without crashing.
-    assert len(chunks) >= 1
-    assert chunks[0]["word_count"] == 1500
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert max(1, round(c["word_count"] * 1.3)) <= cj.MAX_TOKENS
 
 
 def test_long_monologue_split_across_many_segments():
-    # 30 segments x ~50 tokens each = ~1500 tokens — must yield multiple chunks.
+    # 30 segments of distinct words = ~1500 tokens — must yield multiple chunks.
     segs = [
-        {"text": " ".join(["word"] * 40), "start": float(i),
+        {"text": " ".join(f"seg{i}word{j}" for j in range(40)), "start": float(i),
          "end": float(i + 1), "speaker": "A"}
         for i in range(30)
     ]
@@ -95,6 +95,57 @@ def test_long_monologue_split_across_many_segments():
     # Every chunk should sit between MIN and MAX (with some tail tolerance).
     for c in chunks[:-1]:  # all except final tail
         assert c["word_count"] >= 100  # roughly MIN_TOKENS / 1.3 in words
+
+
+# --- 1.2: chunk-quality guards (ASR-loop drop + oversize subdivide) --------
+
+def test_asr_loop_chunk_dropped_not_embedded():
+    # A single segment repeating one phrase for thousands of words is an ASR
+    # loop (unique-word ratio ~0). It must be dropped and dead-lettered, never
+    # embedded.
+    loop = " ".join(["राम"] * 5000)
+    segs = [{"text": loop, "start": 0.0, "end": 300.0, "speaker": "A"}]
+    dead: list = []
+    chunks = cj.chunk_segments(segs, "loop.json", "whisperx", dead_letters=dead)
+    assert chunks == []
+    assert len(dead) == 1
+    assert "asr_loop" in dead[0]["reason"]
+    assert dead[0]["source_file"] == "loop.json"
+
+
+def test_loop_across_many_segments_dropped():
+    # The loop can also be spread across many short segments; the flushed chunk
+    # is still degenerate and must be dropped.
+    segs = [
+        {"text": "हरि ॐ हरि ॐ", "start": float(i), "end": float(i + 1),
+         "speaker": "A"}
+        for i in range(400)
+    ]
+    dead: list = []
+    chunks = cj.chunk_segments(segs, "loop2.json", "whisperx", dead_letters=dead)
+    assert chunks == []
+    assert dead and all("asr_loop" in d["reason"] for d in dead)
+
+
+def test_legit_long_segment_subdivides_to_max_tokens():
+    # A long, healthy (high unique-word) single segment must subdivide into
+    # multiple chunks each within MAX_TOKENS — never one oversize chunk. Distinct
+    # tokens per sentence keep the unique-word ratio well above the loop floor.
+    body = "। ".join(" ".join(f"शब्द{i}क{k}" for k in range(6)) for i in range(400))
+    segs = [{"text": body, "start": 0.0, "end": 500.0, "speaker": "A"}]
+    chunks = cj.chunk_segments(segs, "legit.json", "whisperx")
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert max(1, round(c["word_count"] * 1.3)) <= cj.MAX_TOKENS
+
+
+def test_single_oversize_sentence_raises_loudly():
+    # A single "sentence" with no terminator that alone exceeds MAX_TOKENS
+    # cannot be split on sentence boundaries — raise loudly, never truncate.
+    one_sentence = " ".join(f"w{i}" for i in range(2000))  # ~2600 est-tokens, no '.'
+    segs = [{"text": one_sentence, "start": 0.0, "end": 100.0, "speaker": "A"}]
+    with pytest.raises(ValueError):
+        cj.chunk_segments(segs, "runon.json", "whisperx")
 
 
 def test_unicode_preserved_exactly():
@@ -110,14 +161,15 @@ def test_unicode_preserved_exactly():
 
 def test_speaker_change_after_target_flushes():
     # 50 segments of speaker A (~plenty above TARGET), then 5 from speaker B.
-    # Boundary should land at the speaker change.
+    # Distinct words so nothing trips the ASR-loop guard. Boundary should land
+    # at the speaker change.
     segs = [
-        {"text": " ".join(["alpha"] * 20), "start": float(i),
+        {"text": " ".join(f"alpha{i}x{k}" for k in range(20)), "start": float(i),
          "end": float(i + 1), "speaker": "A"}
         for i in range(50)
     ]
     segs += [
-        {"text": " ".join(["bravo"] * 20), "start": float(50 + i),
+        {"text": " ".join(f"bravo{i}y{k}" for k in range(20)), "start": float(50 + i),
          "end": float(51 + i), "speaker": "B"}
         for i in range(5)
     ]
