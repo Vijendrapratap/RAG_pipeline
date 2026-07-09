@@ -575,6 +575,24 @@ def _progress_line(idx: int, total: int, fname: str, n_chunks: int,
     )
 
 
+def _commit_and_mark(tantivy_writer: "TantivyWriter", progress: ProgressDB,
+                     pending_ok: list[tuple[str, int]]) -> None:
+    """Commit Tantivy, THEN mark the buffered files 'ok'.
+
+    A file is marked 'ok' only after its BM25 docs are durably committed. This
+    closes the race where ``mark_ok`` ran before the periodic Tantivy commit: a
+    crash in that window left up to ``TANTIVY_COMMIT_EVERY`` files reading 'ok'
+    while their BM25 docs were lost. Now a crash there simply re-runs those files
+    on resume, and every store write (Qdrant upsert by chunk_uuid, chunk_meta
+    ``ON CONFLICT DO NOTHING``, Tantivy re-add after a discarded commit) is
+    idempotent, so the retry is exact.
+    """
+    tantivy_writer.commit()
+    for fname, n in pending_ok:
+        progress.mark_ok(fname, n)
+    pending_ok.clear()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Hardened bulk transcript ingestion.")
     parser.add_argument("--chunks-dir", required=True,
@@ -588,6 +606,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Stop after N files (for smoke tests).")
     parser.add_argument("--no-tantivy-health", action="store_true",
                         help="Skip Tantivy in startup health check (sidecar may not be up).")
+    parser.add_argument("--no-skip-existing", action="store_true",
+                        help="Re-ingest files already marked 'ok' (the reindex "
+                             "path uses this after a re-chunk). Default: skip 'ok'.")
     args = parser.parse_args(argv)
 
     setup_logging()
@@ -625,6 +646,9 @@ def main(argv: list[str] | None = None) -> int:
     failed = 0
     grand_total_chunks = 0
     exit_code = 0
+    # Files whose Qdrant/Postgres writes are done but whose Tantivy adds are not
+    # yet committed. Marked 'ok' only at the next commit (see _commit_and_mark).
+    pending_ok: list[tuple[str, int]] = []
 
     try:
         for idx, fpath in enumerate(files, start=1):
@@ -633,10 +657,10 @@ def main(argv: list[str] | None = None) -> int:
                 break
 
             existing = progress.get_status(fpath.name)
-            if existing == "ok":
+            if existing == "ok" and not args.no_skip_existing:
                 skipped += 1
                 continue
-            if existing == "failed" and not args.retry_failed:
+            if existing == "failed" and not (args.retry_failed or args.no_skip_existing):
                 skipped += 1
                 continue
 
@@ -650,7 +674,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 _cancel_file_alarm()
                 n = stats["n_chunks"]
-                progress.mark_ok(fpath.name, n)
+                # Defer 'ok' until the next Tantivy commit (see _commit_and_mark)
+                # so a crash before that commit re-runs the file instead of
+                # stranding its BM25 docs behind an 'ok' marker.
+                pending_ok.append((fpath.name, n))
                 # PRD §6 Phase 6: update file_meta at the end of each file.
                 # No-op when chunk_meta schema is absent (PostgresWriter disabled).
                 if not args.dry_run:
@@ -689,9 +716,10 @@ def main(argv: list[str] | None = None) -> int:
 
             if idx % TANTIVY_COMMIT_EVERY == 0:
                 try:
-                    tantivy_writer.commit()
-                    log.info("tantivy commit at file %d", idx)
+                    _commit_and_mark(tantivy_writer, progress, pending_ok)
+                    log.info("tantivy commit + mark-ok at file %d", idx)
                 except Exception as e:
+                    # Leave pending_ok unmarked — those files retry on resume.
                     log.error("periodic tantivy commit failed: %s", e)
 
             if idx % MEM_CHECK_EVERY == 0:
@@ -705,9 +733,12 @@ def main(argv: list[str] | None = None) -> int:
 
     finally:
         try:
-            tantivy_writer.close()
+            tantivy_writer.close()  # commits the final batch's BM25 adds
+            for fname, n in pending_ok:
+                progress.mark_ok(fname, n)
+            pending_ok.clear()
         except Exception as e:
-            log.error("tantivy close failed: %s", e)
+            log.error("tantivy close / final mark-ok failed: %s", e)
         pg_writer.close()
         stats = progress.stats()
         progress.close()
