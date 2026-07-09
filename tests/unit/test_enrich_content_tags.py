@@ -381,6 +381,27 @@ def test_ollama_generate_json_sends_think_false(monkeypatch) -> None:
     assert captured["body"]["stream"] is False
 
 
+def test_qdrant_set_payload_uses_points_kwarg_with_filter() -> None:
+    """Regression: qdrant-client 1.18 has NO `points_selector` kwarg — the
+    selector arg is `points` (a Filter is accepted). The old name raised
+    TypeError on every propagation, so with 2.0's propagate-then-commit no file
+    could ever be marked tagged."""
+    captured: dict = {}
+
+    class _FakeQ:
+        def set_payload(self, **kwargs):
+            captured.update(kwargs)
+
+    tags = {"event_type": "discourse", "people_named": ["arjun"], "topics": []}
+    enrich.qdrant_set_payload_for_file(_FakeQ(), "Some/File.json", tags)
+
+    assert "points_selector" not in captured
+    assert isinstance(captured.get("points"), enrich.Filter)
+    assert captured["payload"]["event_type"] == "discourse"
+    assert captured["payload"]["people_named"] == ["arjun"]
+    assert "topics" not in captured["payload"]  # empty lists dropped
+
+
 def test_tag_model_default_is_installed_model(monkeypatch) -> None:
     """Guard against regressing to the uninstalled qwen2.5:7b default that made
     every enrichment run dead-letter with an empty/absent-model response."""

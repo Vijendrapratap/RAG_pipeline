@@ -258,10 +258,13 @@ def qdrant_set_payload_for_file(
         payload[k] = v
     if not payload:
         return
+    # `points` (not `points_selector`) is the qdrant-client kwarg; it accepts a
+    # Filter as a selector so this updates every chunk of the file in one call.
+    # Same shape as ingestion/backfill_path_meta.py.
     qclient.set_payload(
         collection_name=QDRANT_COLLECTION,
         payload=payload,
-        points_selector=Filter(
+        points=Filter(
             must=[FieldCondition(key="source_file", match=MatchValue(value=source_file))]
         ),
         wait=True,
