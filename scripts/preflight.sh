@@ -11,8 +11,8 @@ PROCESSED_DIR="${PROCESSED_DIR:-/data/processed_preflight}"
 python scripts/select_random_slice.py \
     --src "$RAW_DIR" --dst "$SLICE_DIR" --target-gb 100
 
-# 2. Chunk
-python -m ingestion.chunker_text "$SLICE_DIR" "$PROCESSED_DIR"
+# 2. Chunk (production corpus is whisperX/whisper JSON; use chunker_text for plain .txt)
+python -m ingestion.chunker_json "$SLICE_DIR" "$PROCESSED_DIR" --format whisperx
 
 # 3. Ingest
 python -m ingestion.bulk_ingest_hardened \

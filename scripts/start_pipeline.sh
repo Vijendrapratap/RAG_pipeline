@@ -131,10 +131,10 @@ cat <<'EOF'
 
 The system is up. Next steps (operator-triggered, in order):
 
-  1. Chunk your transcripts:
+  1. Chunk your transcripts (production corpus is whisperX/whisper JSON):
+       python -m ingestion.chunker_json "$RAW_TRANSCRIPTS_DIR" "$PROCESSED_CHUNKS_DIR" --format whisperx
+       # OR if you have plain .txt:
        python -m ingestion.chunker_text "$RAW_TRANSCRIPTS_DIR" "$PROCESSED_CHUNKS_DIR"
-       # OR if you have whisperX JSON:
-       python -m ingestion.chunker_json "$RAW_TRANSCRIPTS_DIR" "$PROCESSED_CHUNKS_DIR"
 
   2. Preflight on a 100 GB random slice (MANDATORY before full run, ~8–24 h):
        bash scripts/preflight.sh

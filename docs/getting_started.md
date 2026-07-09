@@ -88,10 +88,10 @@ These are intentionally **not** auto-run, because each takes hours-to-days:
 ### 1. Chunk your transcripts (minutes to hours)
 
 ```bash
-# Plain text:
+# whisperX / whisper JSON (the production corpus):
+python -m ingestion.chunker_json "$RAW_TRANSCRIPTS_DIR" "$PROCESSED_CHUNKS_DIR" --format whisperx
+# plain .txt only:
 python -m ingestion.chunker_text "$RAW_TRANSCRIPTS_DIR" "$PROCESSED_CHUNKS_DIR"
-# whisperX JSON:
-python -m ingestion.chunker_json "$RAW_TRANSCRIPTS_DIR" "$PROCESSED_CHUNKS_DIR"
 ```
 
 Output: one `<stem>.chunks.json` per input in `$PROCESSED_CHUNKS_DIR`.

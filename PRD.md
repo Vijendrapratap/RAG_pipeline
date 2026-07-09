@@ -463,7 +463,7 @@ python infra/qdrant/qdrant_setup.py
 - CLI: `python -m ingestion.chunker_json INPUT_DIR OUTPUT_DIR --format whisperx`
 
 `ingestion/chunker_text.py` — implement per Section 5b. Key requirements:
-- Sentence splitting via regex `(?<=[.!?])\s+`.
+- Sentence splitting via regex `(?<=[.!?।॥])\s+` (Latin `.!?` + Devanagari danda `।`/`॥`, so Hindi prose splits).
 - `TARGET_TOKENS=450`, `MAX_TOKENS=700`, `OVERLAP_SENTENCES=2`.
 - Header: `[Source: <file> | Approx position: sentences X-Y | NOTE: plain-text source, timestamps unavailable]`.
 - Metadata includes `has_timestamps: false`.

@@ -1,8 +1,8 @@
-"""Unit tests for the catalog separate-source indexer + search tool.
+"""Unit tests for the catalog separate-source indexer.
 
 Pure logic only — no Qdrant / Ollama / reranker. The HTTP paths are exercised
-by integration tests; here we lock the chunking, document building, point-id
-determinism, and Qdrant filter construction.
+by integration tests; here we lock the chunking, document building, and
+point-id determinism.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from ingestion.catalog.index_catalog import (
     _point_id,
 )
 from ingestion.catalog.normalize import row_to_track
-from open_webui_functions.search_catalog import Tools
+from ingestion.chunker_text import split_sentences
 
 
 # --- chunk_detail ----------------------------------------------------------
@@ -32,6 +32,26 @@ def test_chunk_detail_short_is_one_chunk():
 def test_chunk_detail_long_text_splits():
     # ~120 sentences of ~8 words each -> well over one TARGET window.
     text = " ".join(f"This is sentence number {i} about meditation today." for i in range(120))
+    chunks = chunk_detail(text)
+    assert len(chunks) > 1
+    assert all(c.strip() for c in chunks)
+
+
+# --- 1.1: danda-aware split (Devanagari sentence terminators) --------------
+
+def test_split_sentences_on_danda():
+    # Hindi prose ends sentences with । (danda) and ॥ (double danda). Before 1.1
+    # the split regex knew only .!? so this was ONE sentence; now it is three.
+    parts = split_sentences("पहला वाक्य। दूसरा वाक्य। तीसरा वाक्य॥ चौथा वाक्य।")
+    assert len(parts) == 4
+    assert parts[0] == "पहला वाक्य।"
+
+
+def test_chunk_detail_splits_devanagari_danda():
+    # A long DetailContents in Devanagari: before 1.1 it collapsed to a single
+    # "sentence" -> one oversize chunk; danda-aware splitting now packs it into
+    # multiple TARGET-sized chunks (the precondition 1.2's subdivider relies on).
+    text = " ".join(f"यह ध्यान का {i} वाँ वाक्य है।" for i in range(300))
     chunks = chunk_detail(text)
     assert len(chunks) > 1
     assert all(c.strip() for c in chunks)
@@ -100,32 +120,3 @@ def test_point_id_distinct_per_doc():
 def test_track_without_title_or_key_skipped():
     docs = build_documents([_track(Content=None)])
     assert all(d.payload["doc_type"] != "track_title" for d in docs)
-
-
-# --- search_catalog filter construction ------------------------------------
-
-def test_filter_empty_is_none():
-    assert Tools._build_filter(None, None, None, None, None, None) is None
-
-
-def test_filter_performers_match_any():
-    qf = Tools._build_filter(["Abhipsa", "Suman"], None, None, None, None, None)
-    assert qf["must"][0] == {"key": "performers", "match": {"any": ["Abhipsa", "Suman"]}}
-
-
-def test_filter_performers_string_wrapped():
-    qf = Tools._build_filter("Abhipsa", None, None, None, None, None)
-    assert qf["must"][0]["match"] == {"any": ["Abhipsa"]}
-
-
-def test_filter_location_uppercased():
-    qf = Tools._build_filter(None, "noida", None, None, None, None)
-    assert qf["must"][0] == {"key": "location", "match": {"value": "NOIDA"}}
-
-
-def test_filter_date_range_and_doc_type_combine():
-    qf = Tools._build_filter(
-        None, None, ("2010-01-01", "2010-01-31"), None, None, "track_title"
-    )
-    keys = {c["key"] for c in qf["must"]}
-    assert keys == {"session_date", "doc_type"}

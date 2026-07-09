@@ -85,9 +85,10 @@ bash scripts/02_init_qdrant.sh
 bash scripts/03_init_postgres.sh
 
 # 6. Process your transcripts into searchable chunks.
-python -m ingestion.chunker_text /path/to/raw-transcripts /path/to/processed
-# OR for whisperX JSON output:
-# python -m ingestion.chunker_json /path/to/whisperx-out /path/to/processed
+#    Production corpus is whisperX/whisper JSON — use chunker_json:
+python -m ingestion.chunker_json /path/to/whisperx-out /path/to/processed --format whisperx
+# OR for plain .txt transcripts:
+# python -m ingestion.chunker_text /path/to/raw-transcripts /path/to/processed
 
 # 7. Run the preflight check on a 100 GB slice before the full ingestion.
 bash scripts/preflight.sh

@@ -2,7 +2,7 @@
 
 Per PRD §6 Phase 3:
 - TARGET_TOKENS=450, MAX_TOKENS=700, OVERLAP_SENTENCES=2
-- Sentence split via regex `(?<=[.!?])\\s+`
+- Sentence split via regex `(?<=[.!?।॥])\\s+` (Latin + Devanagari danda)
 - Header prepended to each chunk:
     [Source: <file> | Approx position: sentences X-Y |
      NOTE: plain-text source, timestamps unavailable]
@@ -30,7 +30,11 @@ MAX_TOKENS = 700
 OVERLAP_SENTENCES = 2
 MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# Devanagari prose ends sentences with the danda (।) / double danda (॥), not a
+# Latin '.'. Without them Hindi transcripts collapse into one "sentence" and the
+# packer emits a single oversize chunk — the root of the legit-long chunks 1.2
+# subdivides. The Latin terminators stay so bilingual text still splits.
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?।॥])\s+")
 
 logging.basicConfig(
     level=logging.INFO,
