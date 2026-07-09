@@ -1,0 +1,48 @@
+# §0.2 reranker score-histogram query set — hand-picked KNOWN-GOOD queries.
+#
+# Purpose: measure where the bge-reranker-v2-m3 relevance_score of a *legitimate*
+# hit lands, so cite_min_score is calibrated from the real distribution (not 0.75).
+# NOT a golden set (that is §3.2, and needs negatives) — every query here is
+# expected to have a real answer in the corpus.
+#
+# Grounding: term frequencies probed live from chunk_meta (2026-07-09) — every
+# thematic term matches hundreds–thousands of chunks; every quote is verbatim
+# from a transcript inspected in §0.1. Mix: name / quote / thematic, Devanagari + Latin.
+
+# --- name lookups (Devanagari + Latin) -------------------------------------
+- {id: name-puran-deva,   type: name,     script: deva,  query: "पूरन सिंग का प्रसंग"}
+- {id: name-puran-latin,  type: name,     script: latin, query: "puran singh discourse"}
+- {id: name-varepuran,    type: name,     script: deva,  query: "वारे पूरन सिंग कौन है"}
+- {id: name-puran-who,    type: name,     script: latin, query: "who is puran singh"}
+
+# --- quotes verbatim from inspected transcripts (§0.1) ----------------------
+- {id: quote-masti,       type: quote,    script: deva,  query: "मस्ती के बादशाह"}
+- {id: quote-lapila,      type: quote,    script: deva,  query: "ला पिला रात दिन साकिया"}
+- {id: quote-haram,       type: quote,    script: deva,  query: "मुझे हराम से ना ख्याली"}
+- {id: quote-loot,        type: quote,    script: deva,  query: "तूने लूट लिया मुझको"}
+- {id: quote-diwano-ghar, type: quote,    script: deva,  query: "हम दिवानों का घर साकिया"}
+- {id: quote-surahi,      type: quote,    script: deva,  query: "मुर्शि तेरी सुराही हो गया"}
+- {id: quote-jaam,        type: quote,    script: deva,  query: "एक जाम पिया था तेरे हाथों से"}
+- {id: quote-mann-shant,  type: quote,    script: deva,  query: "मन एक पल के लिए भी शांत नहीं"}
+
+# --- thematic, Devanagari ---------------------------------------------------
+- {id: th-guru-mahima,    type: thematic, script: deva,  query: "गुरु की महिमा क्या है"}
+- {id: th-dhyan-kaise,    type: thematic, script: deva,  query: "ध्यान कैसे करें"}
+- {id: th-surat-shabd,    type: thematic, script: deva,  query: "सुरत शब्द योग क्या है"}
+- {id: th-naam-simran,    type: thematic, script: deva,  query: "नाम सिमरन का महत्व"}
+- {id: th-mann-shant,     type: thematic, script: deva,  query: "मन को कैसे शांत करें"}
+- {id: th-bhakti-prem,    type: thematic, script: deva,  query: "भक्ति और प्रेम का मार्ग"}
+- {id: th-maya,           type: thematic, script: deva,  query: "माया क्या है"}
+- {id: th-moksha,         type: thematic, script: deva,  query: "मोक्ष कैसे मिलता है"}
+- {id: th-guru-shishya,   type: thematic, script: deva,  query: "गुरु और शिष्य का नाता"}
+- {id: th-meditation-dev, type: thematic, script: deva,  query: "मेडिटेशन में सुरत कैसे टिकाएं"}
+
+# --- thematic, Latin / transliteration --------------------------------------
+- {id: th-how-meditate,   type: thematic, script: latin, query: "how to meditate"}
+- {id: th-what-naam,      type: thematic, script: latin, query: "what is naam simran"}
+- {id: th-surat-shabd-en, type: thematic, script: latin, query: "surat shabd yoga"}
+- {id: th-control-mind,   type: thematic, script: latin, query: "how to control the mind"}
+- {id: th-guru-shishya-en,type: thematic, script: latin, query: "guru shishya relationship"}
+- {id: th-bhakti-en,      type: thematic, script: latin, query: "bhakti and divine love"}
+- {id: th-what-maya,      type: thematic, script: latin, query: "what is maya illusion"}
+- {id: th-meditation-hin, type: thematic, script: latin, query: "meditation kaise kare"}
