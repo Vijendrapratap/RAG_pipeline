@@ -12,7 +12,7 @@ with the raw model response. The Phase 12 path metadata is untouched.
 CLI:
     python -m ingestion.enrich_content_tags \\
         [--limit N] [--retry-failed] [--dry-run] \\
-        [--model qwen3.5:9b] [--max-tokens-single-pass 28000]
+        [--model qwen3.5:9b] [--max-tokens-single-pass 27000]
 """
 from __future__ import annotations
 
@@ -34,8 +34,14 @@ from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 
 from ingestion.utils.retries import retry_with_backoff
 from ingestion.utils.tag_schema import (
+    ARRAY_MAX_ITEMS,
+    MAPREDUCE_FRAGMENT_SCHEMA,
+    TAG_FORMAT_SCHEMA,
+    TAG_FORMAT_SCHEMA_BOUNDED,
     build_mapreduce_chunk_prompt,
     build_prompt,
+    dedupe_arrays,
+    dedupe_list,
     parse_model_json,
     validate_tags,
 )
@@ -64,25 +70,36 @@ PG_DSN = os.environ.get(
     ),
 )
 
-# Single-pass budget. 1 token ≈ 4 chars (rough, OK for English+Hindi mix).
-# A 28k-token budget ≈ 112k chars of transcript, well under Qwen's 32k
-# context once we add the schema prompt (~600 tokens of overhead).
-DEFAULT_MAX_TOKENS_SINGLE_PASS = 28_000
-CHARS_PER_TOKEN = 4
-
 # Ollama num_ctx for the tagging call. Has to be ≥ prompt+output tokens.
 # 32768 is comfortable for qwen3.5:9b q4 on the RTX 5090 (32 GB VRAM); raising
 # it risks spilling the KV cache to system RAM, which makes tagging *slower*.
 NUM_CTX = 32_768
 
-# Cap the model's OUTPUT length. The tag JSON is ~10 fields + two short
-# summaries — a well-behaved response is well under 2k tokens. Bounding it
-# stops a runaway repetition loop (observed on refrain-heavy bhajans) from
-# generating until the HTTP read times out, which — with retries — burned
-# ~15 min on a single file during calibration. A truncated response just
-# fails JSON parse and dead-letters fast instead.
-NUM_PREDICT = int(os.environ.get("TAG_NUM_PREDICT", "2048"))
-# Discourage the token-level repetition loops that produce those runaways.
+# Cap the model's OUTPUT length. Worst complete response measured across the
+# corpus (a 200-name roll-call under TAG_FORMAT_SCHEMA) was 2,860 tokens, so the
+# old 2048 cut valid JSON mid-string and dead-lettered the file. 4096 clears it
+# with headroom and still bounds a runaway.
+NUM_PREDICT = int(os.environ.get("TAG_NUM_PREDICT", "4096"))
+
+# Devanagari tokenizes far denser than the 4 chars/token Latin rule of thumb.
+# Measured against Ollama's own prompt_eval_count on six corpus files: 1.68
+# chars/token, predicting the real count within 2%. At the old value of 4 the
+# router believed a 92k-char transcript was 23k tokens (it is ~55k), never
+# routed to map-reduce, and Ollama silently truncated the prompt at num_ctx.
+CHARS_PER_TOKEN = 1.7
+
+# Single-pass budget, in transcript tokens. build_prompt() adds ~990 tokens of
+# schema/rules overhead, so 27_000 + 990 + NUM_PREDICT (4096) = 32,086 — just
+# under NUM_CTX. Above this the file routes to map-reduce.
+DEFAULT_MAX_TOKENS_SINGLE_PASS = 27_000
+
+# Discourage the token-level repetition loops that produce runaway arrays.
+# Measured on the dead-lettered files: raising this to 1.3/1.4 changes nothing
+# (identical rescue rate, near-identical response lengths). The runaways are the
+# model *mirroring* repetition already present in the transcript, not a sampler
+# artifact, so a logit penalty has nothing to bite on. What actually bounds the
+# output is the grammar (TAG_FORMAT_SCHEMA's maxItems) — a prompt-level cap does
+# not bind on the hard files. Left at the llama.cpp default.
 REPEAT_PENALTY = float(os.environ.get("TAG_REPEAT_PENALTY", "1.1"))
 
 _LOG_FMT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -107,14 +124,20 @@ def setup_logging() -> None:
 
 
 @retry_with_backoff(max_tries=3, base=2.0, max_delay=120.0)
-def ollama_generate_json(prompt: str, model: str) -> str:
-    """POST to /api/generate with format=json. Returns raw response text.
+def ollama_generate_json(prompt: str, model: str, fmt: dict[str, Any]) -> str:
+    """POST to /api/generate with a JSON Schema `format`. Returns raw response.
 
-    `think=False` is mandatory: qwen3.5:9b is a thinking model, and with
-    format=json its output routes into the `thinking` field, leaving
-    `response` EMPTY — every file would then dead-letter as "empty response".
-    It is also accepted by non-thinking models, so it is safe regardless of
-    which TAG_MODEL is configured. (Mirrors rag_api/pageindex.py.)
+    `fmt` must be a JSON Schema, not the string "json". Ollama compiles a schema
+    into a decoding grammar, which is the only thing that actually bounds array
+    length; with format="json" the model is free to emit 658 array items and blow
+    past num_predict mid-string, dead-lettering the file. Callers pass
+    TAG_FORMAT_SCHEMA or MAPREDUCE_FRAGMENT_SCHEMA depending on the phase.
+
+    `think=False` is mandatory: qwen3.5:9b is a thinking model, and with a JSON
+    format its output routes into the `thinking` field, leaving `response` EMPTY
+    — every file would then dead-letter as "empty response". It is also accepted
+    by non-thinking models, so it is safe regardless of which TAG_MODEL is
+    configured. (Mirrors rag_api/pageindex.py.)
 
     A read timeout is re-raised as a non-retryable RuntimeError: it means the
     model is stuck generating (a repetition loop on degenerate input), so
@@ -127,7 +150,7 @@ def ollama_generate_json(prompt: str, model: str) -> str:
             json={
                 "model": model,
                 "prompt": prompt,
-                "format": "json",
+                "format": fmt,
                 "stream": False,
                 "think": False,
                 "options": {
@@ -298,7 +321,7 @@ def qdrant_set_payload_for_file(
 
 
 def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // CHARS_PER_TOKEN)
+    return max(1, int(len(text) / CHARS_PER_TOKEN))
 
 
 def tag_transcript_single_pass(
@@ -306,14 +329,31 @@ def tag_transcript_single_pass(
 ) -> tuple[dict[str, Any] | None, str, str | None]:
     """Returns (tags_or_none, raw_response, error_reason)."""
     prompt = build_prompt(transcript)
-    raw = ollama_generate_json(prompt, model)
+    raw = ollama_generate_json(prompt, model, TAG_FORMAT_SCHEMA)
     obj, parse_err = parse_model_json(raw)
     if obj is None:
-        return None, raw, parse_err
+        # Only one thing makes a grammar-constrained response unparseable: the
+        # model filled num_predict before closing the object. That happens when a
+        # degenerate transcript (an ASR chant loop) gets mirrored into padding.
+        # Retry once under a schema whose worst-case output provably fits the
+        # budget, so the file yields a small valid record instead of dead-lettering.
+        log.warning("primary schema truncated (%s) — retrying with bounded schema",
+                    parse_err)
+        raw = ollama_generate_json(prompt, model, TAG_FORMAT_SCHEMA_BOUNDED)
+        obj, parse_err = parse_model_json(raw)
+        if obj is None:
+            return None, raw, f"bounded-schema retry also failed: {parse_err}"
     ok, errs = validate_tags(obj)
     if not ok:
         return None, raw, "; ".join(errs)
-    return obj, raw, None
+    # The grammar caps array *length*; it does not enforce uniqueItems (llama.cpp
+    # ignores that keyword). Strip the duplicate padding before it reaches
+    # Postgres and every chunk payload in Qdrant.
+    return dedupe_arrays(obj), raw, None
+
+
+def _str_list(value: Any) -> list[str]:
+    return [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
 
 
 def tag_transcript_mapreduce(
@@ -324,6 +364,11 @@ def tag_transcript_mapreduce(
     The chunking here is *re-chunking* the transcript for tagging purposes
     only. We do not touch the embedding-side chunks in chunk_meta — those
     keep their original boundaries.
+
+    Entities found per fragment are unioned back into the reduced result. The
+    reduce pass only ever sees the fragment summaries, so without this a person
+    named once in a 90k-char transcript is summarised away and lost — and long
+    transcripts are exactly the ones with the roll-calls worth keeping.
     """
     pieces: list[str] = []
     for i in range(0, len(transcript), max_chars_per_chunk):
@@ -331,8 +376,11 @@ def tag_transcript_mapreduce(
     log.info("map-reduce: %d fragments", len(pieces))
 
     summaries: list[str] = []
+    found: dict[str, list[str]] = {"people": [], "places": [], "scriptures": []}
     for idx, piece in enumerate(pieces, start=1):
-        raw = ollama_generate_json(build_mapreduce_chunk_prompt(piece), model)
+        raw = ollama_generate_json(
+            build_mapreduce_chunk_prompt(piece), model, MAPREDUCE_FRAGMENT_SCHEMA
+        )
         obj, perr = parse_model_json(raw)
         if obj is None or "summary" not in obj:
             log.warning("map-reduce fragment %d/%d: bad mini-summary (%s) — "
@@ -340,9 +388,22 @@ def tag_transcript_mapreduce(
             summaries.append(piece[:500])
             continue
         summaries.append(str(obj.get("summary", "")))
+        for key in found:
+            found[key].extend(_str_list(obj.get(key)))
 
     reduced = "\n\n".join(f"Fragment {i+1}: {s}" for i, s in enumerate(summaries))
-    return tag_transcript_single_pass(reduced, model)
+    tags, raw, err = tag_transcript_single_pass(reduced, model)
+    if tags is None:
+        return None, raw, err
+
+    for tag_key, frag_key in (
+        ("people_named", "people"),
+        ("places_named", "places"),
+        ("scriptures_referenced", "scriptures"),
+    ):
+        merged = dedupe_list(list(tags.get(tag_key) or []) + found[frag_key])
+        tags[tag_key] = merged[: ARRAY_MAX_ITEMS[tag_key]]
+    return tags, raw, None
 
 
 # ---- main loop ----------------------------------------------------------

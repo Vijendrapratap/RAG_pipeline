@@ -40,6 +40,149 @@ STRING_KEYS: frozenset[str] = frozenset({
     "event_type", "primary_language", "summary_hindi", "summary_english",
 })
 
+# Hard per-array caps, enforced by the decoding grammar (see build_format_schema).
+# Sized to the real corpus rather than to what a tidy response looks like: one
+# Panchkula satsang legitimately names 122 distinct people in a roll-call, so a
+# people_named cap of 15 would silently truncate real data. The cap exists to
+# bound a *runaway*, not to shape a good answer.
+ARRAY_MAX_ITEMS: dict[str, int] = {
+    "topics": 8,
+    "people_named": 200,
+    "places_named": 60,
+    "scriptures_referenced": 60,
+    "timing_clues": 6,
+    "location_clues": 6,
+}
+# Per-string caps. maxItems alone is not enough: on a chant loop the model stops
+# repeating across array *items* and starts repeating inside a single *string*
+# ("नमो नमो नमो …" for 14k chars), which overruns num_predict and truncates the
+# JSON just the same. maxLength is grammar-enforced (measured: summary_hindi came
+# back at exactly 1200 chars).
+ITEM_MAX_LENGTH: dict[str, int] = {
+    "topics": 40,
+    "people_named": 60,
+    "places_named": 60,
+    "scriptures_referenced": 80,
+    "timing_clues": 120,
+    "location_clues": 120,
+}
+SUMMARY_MAX_LENGTH = 1200
+
+# The fallback used when the model mirrors a degenerate transcript and fills the
+# whole output budget with padding. Worst-case serialised output is
+#   5*40 + 15*40 + 10*40 + 10*60 + 4*100 + 4*100 + 2*600 = 3,800 chars
+# which at the measured 1.68 chars/token is ~2,260 tokens — provably inside
+# NUM_PREDICT. A degenerate file therefore yields a small valid record instead of
+# a dead-letter. Real roll-calls never trigger it (they parse on the first try).
+BOUNDED_MAX_ITEMS: dict[str, int] = {
+    "topics": 5, "people_named": 15, "places_named": 10,
+    "scriptures_referenced": 10, "timing_clues": 4, "location_clues": 4,
+}
+BOUNDED_ITEM_MAX_LENGTH: dict[str, int] = {
+    "topics": 40, "people_named": 40, "places_named": 40,
+    "scriptures_referenced": 60, "timing_clues": 100, "location_clues": 100,
+}
+BOUNDED_SUMMARY_MAX_LENGTH = 600
+
+assert frozenset(ARRAY_MAX_ITEMS) == ARRAY_KEYS, "ARRAY_MAX_ITEMS must cover ARRAY_KEYS"
+assert frozenset(ITEM_MAX_LENGTH) == ARRAY_KEYS, "ITEM_MAX_LENGTH must cover ARRAY_KEYS"
+
+
+def build_format_schema(
+    max_items: dict[str, int] | None = None,
+    item_max_length: dict[str, int] | None = None,
+    summary_max_length: int = SUMMARY_MAX_LENGTH,
+) -> dict[str, Any]:
+    """The JSON Schema handed to Ollama's `format` parameter.
+
+    Ollama compiles this into a GBNF decoding grammar, so `maxItems`, `maxLength`
+    and the two enums become *structural* constraints the model physically cannot
+    violate — unlike the same rules stated in the prompt, which a model mirroring
+    a repetitive transcript will happily ignore until num_predict cuts the JSON
+    mid-string and the file dead-letters.
+
+    `uniqueItems` is deliberately absent: llama.cpp's grammar compiler ignores it
+    (measured — byte-identical output, same token count, with and without).
+    Duplicates are stripped afterwards by dedupe_arrays().
+    """
+    items = max_items or ARRAY_MAX_ITEMS
+    lens = item_max_length or ITEM_MAX_LENGTH
+    return {
+        "type": "object",
+        "properties": {
+            "event_type": {"type": "string", "enum": sorted(ALLOWED_EVENT_TYPES)},
+            "primary_language": {"type": "string", "enum": sorted(ALLOWED_LANGUAGES)},
+            **{
+                k: {
+                    "type": "array",
+                    "maxItems": items[k],
+                    "items": {"type": "string", "maxLength": lens[k]},
+                }
+                for k in items
+            },
+            "summary_hindi": {"type": "string", "maxLength": summary_max_length},
+            "summary_english": {"type": "string", "maxLength": summary_max_length},
+        },
+        "required": list(REQUIRED_KEYS),
+    }
+
+
+TAG_FORMAT_SCHEMA: dict[str, Any] = build_format_schema()
+TAG_FORMAT_SCHEMA_BOUNDED: dict[str, Any] = build_format_schema(
+    BOUNDED_MAX_ITEMS, BOUNDED_ITEM_MAX_LENGTH, BOUNDED_SUMMARY_MAX_LENGTH
+)
+
+# The map phase of map-reduce returns a different shape than the tag object.
+# It gets its own grammar for the same reason: fragments of a roll-call bhajan
+# are exactly the input that makes an unconstrained array run away.
+MAPREDUCE_FRAGMENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "people": {"type": "array", "items": {"type": "string"}, "maxItems": 60},
+        "places": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
+        "scriptures": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
+    },
+    "required": ["summary", "people", "places", "scriptures"],
+}
+
+
+def dedupe_list(items: list[str]) -> list[str]:
+    """Order-preserving, case- and whitespace-insensitive dedupe.
+
+    First surface form of each name wins, so 'Guru Nanak' survives and a later
+    'guru nanak' does not. Internal whitespace is collapsed on the kept value.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in items:
+        if not isinstance(x, str):
+            continue
+        key = " ".join(x.lower().split())
+        if key and key not in seen:
+            seen.add(key)
+            out.append(" ".join(x.split()))
+    return out
+
+
+def dedupe_arrays(tags: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of `tags` with every array field deduped and capped.
+
+    The grammar bounds array *length*, not array *content*: given a transcript
+    that repeats one name 600 times the model still emits it up to maxItems
+    times. This is the deterministic half of that fix.
+    """
+    out = dict(tags)
+    for k in ARRAY_KEYS:
+        v = out.get(k)
+        if isinstance(v, list):
+            out[k] = dedupe_list(v)[: ARRAY_MAX_ITEMS[k]]
+    return out
+
+
+def _caps_sentence() -> str:
+    return ", ".join(f"{k} {n}" for k, n in ARRAY_MAX_ITEMS.items())
+
 
 def build_prompt(transcript: str) -> str:
     """Build the Qwen prompt. Schema-strict; demands valid JSON output.
@@ -69,6 +212,15 @@ def build_prompt(transcript: str) -> str:
         "mixed, unknown. Use 'unknown' if genuinely unclear.\n"
         "- primary_language MUST be one of: hindi, sanskrit, mixed.\n"
         "- Arrays may be empty ([]) if nothing applies.\n"
+        # Refrain-heavy bhajans and roll-calls make the model mirror the input's
+        # repetition, emitting one array element hundreds of times. Stating the
+        # rule here is advisory only — the model ignores it on exactly the inputs
+        # that need it (measured: 136 of 163 failing arrays blew a 15-item prompt
+        # cap). The load-bearing enforcement is the grammar in TAG_FORMAT_SCHEMA
+        # plus dedupe_arrays(); this sentence only nudges the easy cases.
+        "- Every array MUST contain only UNIQUE values. NEVER repeat a value "
+        "within an array, and never pad an array with duplicates to make it "
+        f"longer. Maximum items: {_caps_sentence()}.\n"
         "- Return ONLY the JSON object. No prose before or after.\n\n"
         "Transcript:\n"
         "---\n"
@@ -123,6 +275,11 @@ def validate_tags(obj: Any) -> tuple[bool, list[str]]:
             continue
         if not all(isinstance(x, str) for x in v):
             errors.append(f"{k!r} must be a list of strings")
+        # Belt to the grammar's braces: if the caller ever drops TAG_FORMAT_SCHEMA
+        # and reverts to format="json", a runaway array fails loudly here instead
+        # of being written to Postgres and fanned out to every chunk payload.
+        if len(v) > ARRAY_MAX_ITEMS[k]:
+            errors.append(f"{k!r} has {len(v)} items, exceeds cap {ARRAY_MAX_ITEMS[k]}")
 
     for k in STRING_KEYS:
         v = obj.get(k)

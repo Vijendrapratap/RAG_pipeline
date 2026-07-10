@@ -15,9 +15,20 @@ from ingestion import enrich_content_tags as enrich
 from ingestion.utils.tag_schema import (
     ALLOWED_EVENT_TYPES,
     ALLOWED_LANGUAGES,
+    ARRAY_KEYS,
+    ARRAY_MAX_ITEMS,
+    BOUNDED_ITEM_MAX_LENGTH,
+    BOUNDED_MAX_ITEMS,
+    BOUNDED_SUMMARY_MAX_LENGTH,
+    ITEM_MAX_LENGTH,
     REQUIRED_KEYS,
+    SUMMARY_MAX_LENGTH,
+    TAG_FORMAT_SCHEMA,
+    TAG_FORMAT_SCHEMA_BOUNDED,
     build_mapreduce_chunk_prompt,
     build_prompt,
+    dedupe_arrays,
+    dedupe_list,
     parse_model_json,
     validate_tags,
 )
@@ -355,7 +366,7 @@ def test_process_one_file_propagates_before_committing(tmp_path, monkeypatch) ->
 
 
 def test_ollama_generate_json_sends_think_false(monkeypatch) -> None:
-    """qwen3.5:9b is a thinking model. With format=json and thinking ON, the
+    """qwen3.5:9b is a thinking model. With a JSON format and thinking ON, the
     output routes into `thinking` and `response` is EMPTY → every file would
     dead-letter as 'empty response'. The tagging call MUST send think=false."""
     captured: dict = {}
@@ -373,12 +384,41 @@ def test_ollama_generate_json_sends_think_false(monkeypatch) -> None:
         return _Resp()
 
     monkeypatch.setattr(enrich.requests, "post", _fake_post)
-    out = enrich.ollama_generate_json("some prompt", "qwen3.5:9b")
+    out = enrich.ollama_generate_json("some prompt", "qwen3.5:9b", TAG_FORMAT_SCHEMA)
 
     assert out == '{"ok": true}'
     assert captured["body"]["think"] is False
-    assert captured["body"]["format"] == "json"
     assert captured["body"]["stream"] is False
+
+
+def test_ollama_generate_json_sends_grammar_not_bare_json(monkeypatch) -> None:
+    """Regression: `format: "json"` lets the model emit unbounded arrays — 658
+    items on one bhajan — which overruns num_predict and truncates the JSON
+    mid-string. A schema in `format` compiles to a decoding grammar, so maxItems
+    is structurally unviolable. The string "json" must never be sent again."""
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"response": "{}"}
+
+    def _fake_post(url, json, timeout):  # noqa: A002
+        captured["body"] = json
+        return _Resp()
+
+    monkeypatch.setattr(enrich.requests, "post", _fake_post)
+    enrich.ollama_generate_json("p", "qwen3.5:9b", TAG_FORMAT_SCHEMA)
+
+    fmt = captured["body"]["format"]
+    assert fmt != "json"
+    assert isinstance(fmt, dict)
+    for key in ARRAY_KEYS:
+        assert fmt["properties"][key]["maxItems"] == ARRAY_MAX_ITEMS[key]
+    assert set(fmt["properties"]["event_type"]["enum"]) == ALLOWED_EVENT_TYPES
+    assert set(fmt["properties"]["primary_language"]["enum"]) == ALLOWED_LANGUAGES
 
 
 def test_ollama_generate_json_bounds_generation(monkeypatch) -> None:
@@ -398,11 +438,36 @@ def test_ollama_generate_json_bounds_generation(monkeypatch) -> None:
         return _Resp()
 
     monkeypatch.setattr(enrich.requests, "post", _fake_post)
-    enrich.ollama_generate_json("p", "qwen3.5:9b")
+    enrich.ollama_generate_json("p", "qwen3.5:9b", TAG_FORMAT_SCHEMA)
 
     opts = captured["body"]["options"]
     assert opts["num_predict"] == enrich.NUM_PREDICT
     assert opts["repeat_penalty"] == enrich.REPEAT_PENALTY
+
+
+def test_num_predict_clears_worst_observed_response() -> None:
+    """The worst complete tag response measured on the corpus was 2,860 output
+    tokens. At the old 2048 it was cut mid-string and the file dead-lettered."""
+    assert enrich.NUM_PREDICT >= 2_860
+
+
+def test_single_pass_budget_fits_in_context() -> None:
+    """transcript + build_prompt overhead + NUM_PREDICT must fit inside NUM_CTX,
+    or Ollama silently truncates the prompt (prompt_eval_count pins at num_ctx)."""
+    overhead = enrich._estimate_tokens(build_prompt(""))
+    assert (
+        enrich.DEFAULT_MAX_TOKENS_SINGLE_PASS + overhead + enrich.NUM_PREDICT
+        <= enrich.NUM_CTX
+    )
+
+
+def test_chars_per_token_matches_devanagari_density() -> None:
+    """Measured against Ollama's prompt_eval_count on six corpus files: 1.68
+    chars/token. The old Latin-derived 4 made a 55k-token prompt look like 23k,
+    so map-reduce never fired and long files were silently truncated."""
+    assert 1.5 <= enrich.CHARS_PER_TOKEN <= 2.0
+    # A 92k-char transcript (the corpus maximum) must route to map-reduce.
+    assert enrich._estimate_tokens("x" * 92_000) > enrich.DEFAULT_MAX_TOKENS_SINGLE_PASS
 
 
 def test_read_timeout_is_not_retried(monkeypatch) -> None:
@@ -416,8 +481,239 @@ def test_read_timeout_is_not_retried(monkeypatch) -> None:
 
     monkeypatch.setattr(enrich.requests, "post", _timeout_post)
     with pytest.raises(RuntimeError, match="stuck generating"):
-        enrich.ollama_generate_json("prompt", "qwen3.5:9b")
+        enrich.ollama_generate_json("prompt", "qwen3.5:9b", TAG_FORMAT_SCHEMA)
     assert calls["n"] == 1  # NOT retried 3x
+
+
+# ---- 2.3 correctness: dedupe + cardinality ------------------------------
+
+
+def test_dedupe_list_is_order_preserving_and_case_insensitive() -> None:
+    out = dedupe_list(["Guru Nanak", "guru nanak", "Kabir", "GURU NANAK", "Kabir"])
+    assert out == ["Guru Nanak", "Kabir"]  # first surface form wins
+
+
+def test_dedupe_list_collapses_internal_whitespace() -> None:
+    assert dedupe_list(["Guru   Nanak", "Guru Nanak"]) == ["Guru Nanak"]
+
+
+def test_dedupe_list_drops_empties_and_non_strings() -> None:
+    assert dedupe_list(["a", "", "   ", None, 42, "A"]) == ["a"]  # type: ignore[list-item]
+
+
+def test_dedupe_arrays_kills_the_runaway() -> None:
+    """The observed worst case: 658 items, 11 distinct, 'ram' x647. The grammar
+    caps length at 200; dedupe must reduce that to the 11 real names."""
+    tags = _valid_tags()
+    tags["people_named"] = (["ram"] * 190) + [f"name{i}" for i in range(10)]
+    out = dedupe_arrays(tags)
+    assert out["people_named"] == ["ram"] + [f"name{i}" for i in range(10)]
+
+
+def test_dedupe_arrays_caps_at_max_items() -> None:
+    tags = _valid_tags()
+    tags["people_named"] = [f"person{i}" for i in range(500)]
+    out = dedupe_arrays(tags)
+    assert len(out["people_named"]) == ARRAY_MAX_ITEMS["people_named"]
+
+
+def test_dedupe_arrays_does_not_clip_a_legitimate_roll_call() -> None:
+    """One Panchkula satsang names 122 distinct people. A 15-item cap would have
+    thrown 107 real names away; the 200-item cap must leave them alone."""
+    tags = _valid_tags()
+    tags["people_named"] = [f"rishi kumar {i}" for i in range(122)]
+    out = dedupe_arrays(tags)
+    assert len(out["people_named"]) == 122
+
+
+def test_dedupe_arrays_leaves_strings_untouched() -> None:
+    tags = _valid_tags()
+    out = dedupe_arrays(tags)
+    assert out["summary_hindi"] == tags["summary_hindi"]
+    assert out["event_type"] == "discourse"
+
+
+def test_validate_rejects_array_over_cap() -> None:
+    """Belt to the grammar's braces: if format= ever reverts to "json", an
+    unbounded array must fail loudly, not reach Postgres and Qdrant."""
+    tags = _valid_tags()
+    tags["people_named"] = ["ram"] * (ARRAY_MAX_ITEMS["people_named"] + 1)
+    ok, errs = validate_tags(tags)
+    assert not ok
+    assert any("exceeds cap" in e and "people_named" in e for e in errs)
+
+
+def test_single_pass_dedupes_before_returning(monkeypatch) -> None:
+    """dedupe must happen inside the tagging path, so both the Postgres write
+    and the Qdrant payload fan-out see clean arrays."""
+    dirty = _valid_tags()
+    dirty["people_named"] = ["Ram", "ram", "RAM", "Kabir"]
+    monkeypatch.setattr(
+        enrich, "ollama_generate_json",
+        lambda prompt, model, fmt: json.dumps(dirty),
+    )
+    tags, _raw, err = enrich.tag_transcript_single_pass("transcript", "qwen3.5:9b")
+    assert err is None
+    assert tags["people_named"] == ["Ram", "Kabir"]
+
+
+# ---- 2.3 correctness: string-length runaway + bounded fallback ----------
+
+
+def test_schema_caps_every_string_length() -> None:
+    """maxItems bounds how MANY items; on a chant loop the model instead repeats
+    inside ONE string ('नमो नमो …' x 14k chars) and overruns num_predict just the
+    same. Every string in the grammar must carry maxLength."""
+    props = TAG_FORMAT_SCHEMA["properties"]
+    for key in ARRAY_KEYS:
+        assert props[key]["items"]["maxLength"] == ITEM_MAX_LENGTH[key]
+    assert props["summary_hindi"]["maxLength"] == SUMMARY_MAX_LENGTH
+    assert props["summary_english"]["maxLength"] == SUMMARY_MAX_LENGTH
+
+
+def test_bounded_schema_worst_case_fits_num_predict() -> None:
+    """The whole point of the fallback: its maximal serialised output must fit
+    inside NUM_PREDICT, so a degenerate file yields a record, not a dead-letter."""
+    worst_chars = sum(
+        BOUNDED_MAX_ITEMS[k] * BOUNDED_ITEM_MAX_LENGTH[k] for k in ARRAY_KEYS
+    ) + 2 * BOUNDED_SUMMARY_MAX_LENGTH
+    worst_tokens = worst_chars / enrich.CHARS_PER_TOKEN
+    assert worst_tokens < enrich.NUM_PREDICT, f"{worst_tokens:.0f} tokens >= NUM_PREDICT"
+
+
+def test_bounded_schema_is_strictly_tighter_than_primary() -> None:
+    """validate_tags checks against the primary caps, so bounded output must be a
+    subset — otherwise a fallback result could fail validation."""
+    for key in ARRAY_KEYS:
+        assert BOUNDED_MAX_ITEMS[key] <= ARRAY_MAX_ITEMS[key]
+        assert BOUNDED_ITEM_MAX_LENGTH[key] <= ITEM_MAX_LENGTH[key]
+    assert BOUNDED_SUMMARY_MAX_LENGTH <= SUMMARY_MAX_LENGTH
+
+
+def test_single_pass_falls_back_to_bounded_on_truncation(monkeypatch) -> None:
+    """A grammar-constrained response can only fail to parse by hitting
+    num_predict. Retry once with the bounded schema rather than dead-lettering."""
+    seen: list = []
+    good = json.dumps(_valid_tags())
+
+    def _gen(prompt, model, fmt):
+        seen.append(fmt)
+        # first call truncates mid-string, second (bounded) succeeds
+        return '{"event_type": "bhajan", "people_named": ["ram' if len(seen) == 1 else good
+
+    monkeypatch.setattr(enrich, "ollama_generate_json", _gen)
+    tags, _raw, err = enrich.tag_transcript_single_pass("chant loop", "qwen3.5:9b")
+
+    assert err is None
+    assert tags["event_type"] == "discourse"
+    assert seen == [TAG_FORMAT_SCHEMA, TAG_FORMAT_SCHEMA_BOUNDED]
+
+
+def test_single_pass_does_not_retry_when_primary_parses(monkeypatch) -> None:
+    """The fallback costs a whole extra generation. Healthy files must not pay."""
+    seen: list = []
+
+    def _gen(prompt, model, fmt):
+        seen.append(fmt)
+        return json.dumps(_valid_tags())
+
+    monkeypatch.setattr(enrich, "ollama_generate_json", _gen)
+    enrich.tag_transcript_single_pass("healthy transcript", "qwen3.5:9b")
+    assert seen == [TAG_FORMAT_SCHEMA]
+
+
+def test_single_pass_gives_up_after_one_fallback(monkeypatch) -> None:
+    """Exactly one retry. A file the bounded schema cannot tag must dead-letter
+    with the reason, not spin."""
+    seen: list = []
+
+    def _gen(prompt, model, fmt):
+        seen.append(fmt)
+        return '{"truncated'
+
+    monkeypatch.setattr(enrich, "ollama_generate_json", _gen)
+    tags, _raw, err = enrich.tag_transcript_single_pass("hopeless", "qwen3.5:9b")
+
+    assert tags is None
+    assert "bounded-schema retry also failed" in err
+    assert len(seen) == 2
+
+
+def test_validate_failure_does_not_trigger_fallback(monkeypatch) -> None:
+    """A validation error (bad enum) is not a truncation — retrying the identical
+    prompt would just reproduce it. Only parse failures fall back."""
+    seen: list = []
+    bad = _valid_tags()
+    bad["event_type"] = "announcement"
+
+    def _gen(prompt, model, fmt):
+        seen.append(fmt)
+        return json.dumps(bad)
+
+    monkeypatch.setattr(enrich, "ollama_generate_json", _gen)
+    tags, _raw, err = enrich.tag_transcript_single_pass("x", "qwen3.5:9b")
+
+    assert tags is None
+    assert "announcement" in err
+    assert seen == [TAG_FORMAT_SCHEMA]  # no retry
+
+
+# ---- 2.3 correctness: map-reduce actually keeps what it finds ------------
+
+
+def test_mapreduce_unions_fragment_entities_into_result(monkeypatch) -> None:
+    """The reduce pass only sees fragment summaries, so a name mentioned once in
+    a 90k-char transcript would be summarised away. Fragment entities must be
+    merged back in — long transcripts are where the roll-calls live."""
+    calls: list[dict] = []
+
+    def _fake_gen(prompt, model, fmt):
+        calls.append(fmt)
+        return json.dumps({
+            "summary": "a fragment", "people": ["Aashish ji", "aashish ji"],
+            "places": ["Dagshai"], "scriptures": [],
+        })
+
+    reduced = _valid_tags()
+    reduced["people_named"] = ["Swami ji"]
+    reduced["places_named"] = []
+
+    monkeypatch.setattr(enrich, "ollama_generate_json", _fake_gen)
+    monkeypatch.setattr(
+        enrich, "tag_transcript_single_pass",
+        lambda transcript, model: (dict(reduced), "{}", None),
+    )
+
+    tags, _raw, err = enrich.tag_transcript_mapreduce(
+        "x" * 25_000, "qwen3.5:9b", max_chars_per_chunk=10_000
+    )
+    assert err is None
+    assert len(calls) == 3  # 3 fragments, each mapped
+    assert all(f is enrich.MAPREDUCE_FRAGMENT_SCHEMA for f in calls)
+    # reduce-phase name kept, fragment names unioned in, duplicates collapsed
+    assert tags["people_named"] == ["Swami ji", "Aashish ji"]
+    assert tags["places_named"] == ["Dagshai"]
+
+
+def test_mapreduce_uses_fragment_schema_not_tag_schema(monkeypatch) -> None:
+    """The map phase returns {summary, people, places, scriptures}, a different
+    shape than the tag object. Sending TAG_FORMAT_SCHEMA would force the grammar
+    to emit the wrong keys and every fragment would fall back to raw text."""
+    seen: list = []
+    monkeypatch.setattr(
+        enrich, "ollama_generate_json",
+        lambda prompt, model, fmt: seen.append(fmt) or json.dumps(
+            {"summary": "s", "people": [], "places": [], "scriptures": []}
+        ),
+    )
+    monkeypatch.setattr(
+        enrich, "tag_transcript_single_pass",
+        lambda transcript, model: (_valid_tags(), "{}", None),
+    )
+    enrich.tag_transcript_mapreduce("y" * 5_000, "qwen3.5:9b")
+    assert seen == [enrich.MAPREDUCE_FRAGMENT_SCHEMA]
+    assert "summary" in seen[0]["properties"]
+    assert "event_type" not in seen[0]["properties"]
 
 
 def test_qdrant_set_payload_uses_points_kwarg_with_filter() -> None:
