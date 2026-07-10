@@ -446,6 +446,29 @@ class Retriever:
             log.error("tantivy doc count failed: %s", e)
             return 0
 
+    def summary_doc_count(self) -> int:
+        """Points in the file-level summary collection (0 if it does not exist
+        yet). Mirrors tantivy_doc_count for /api/health — lets an operator see
+        that scope=summaries / scope=two_stage are actually backed by an index
+        instead of silently degrading to a chunk search."""
+        headers = {"Content-Type": "application/json"}
+        if self.settings.qdrant_key:
+            headers["api-key"] = self.settings.qdrant_key
+        try:
+            r = self._session.post(
+                f"{self.settings.qdrant_url}/collections/"
+                f"{self.settings.qdrant_summary_collection}/points/count",
+                json={"exact": True}, headers=headers,
+                timeout=self.settings.http_timeout_s,
+            )
+            if r.status_code == 404:
+                return 0
+            r.raise_for_status()
+            return int((r.json().get("result") or {}).get("count", 0))
+        except Exception as e:  # pragma: no cover - defensive
+            log.error("summary doc count failed: %s", e)
+            return 0
+
     def reload_tantivy(self) -> int:
         """Re-open + reload the index (call after fresh ingestion). Returns
         the new doc count; attempts a cold open if it was disabled before."""

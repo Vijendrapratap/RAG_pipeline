@@ -294,6 +294,9 @@ def health() -> dict[str, Any]:
         "services": services,
         "bm25_enabled": retriever.bm25_enabled,
         "tantivy_docs": retriever.tantivy_doc_count(),
+        # File-level summary index (scope=summaries / two_stage). 0 until
+        # ingestion.build_summary_index has run.
+        "summary_docs": retriever.summary_doc_count(),
         "retrieval_backend": s.retrieval_backend,
         "pageindex_trees": len(pageindex.available_docs()),
         "auth_required": bool(s.dashboard_password),
