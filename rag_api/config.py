@@ -250,6 +250,12 @@ class Settings(BaseModel):
     # thematic golden set — so it stays off until an A/B certifies it.
     hyde_thematic_enabled: bool = os.environ.get(
         "RAG_HYDE_THEMATIC", "off").lower() in ("1", "true", "yes", "on")
+    # Stage 4.3: rewrite a context-dependent follow-up into a standalone query
+    # (using request `history`) before retrieval. Requires router_enabled. One
+    # think=false chat round-trip, and only when history is present AND the
+    # router tags the query `followup`. Default off until an A/B certifies it.
+    followup_rewrite_enabled: bool = os.environ.get(
+        "RAG_FOLLOWUP_REWRITE", "off").lower() in ("1", "true", "yes", "on")
     http_timeout_s: float = float(os.environ.get("HTTP_TIMEOUT_S", "30"))
     # Two-stage retrieval: how many files stage 1 (summary search) keeps
     # before drilling into their chunks in stage 2.

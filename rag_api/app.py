@@ -47,6 +47,7 @@ from rag_api.pageindex import PageIndexRetriever
 from rag_api.query_parse import (
     detect_quote, detect_signals, merge_filters, signals_to_filters,
 )
+from rag_api.followup import FollowupRewriter
 from rag_api.retrieval import Retriever
 from rag_api.route import route
 from rag_api.synthesis import Synthesizer
@@ -144,6 +145,11 @@ class QueryRequest(BaseModel):
     # When omitted, the env-configured default is used.
     provider: Literal["ollama", "openrouter"] | None = None
     model: str | None = None
+    # Prior conversation turns, oldest first. Each: {question, answer} (the
+    # dashboard's shape) or {role, content}. When present and the router tags
+    # the query `followup`, it is rewritten to a standalone query before
+    # retrieval (Stage 4.3, gated by RAG_FOLLOWUP_REWRITE). Empty = no rewrite.
+    history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +166,7 @@ async def lifespan(app: FastAPI):
     # stage-1 doc selection + reranking. Never engaged unless a request asks
     # for backend=pageindex (or RETRIEVAL_BACKEND flips the default).
     app.state.pageindex = PageIndexRetriever(settings, app.state.retriever)
+    app.state.followup = FollowupRewriter(settings)
     app.state.synthesizer = Synthesizer(settings)
     app.state.analytics = Analytics(settings.pg_dsn)
     app.state.history = History(settings.pg_dsn)
@@ -385,15 +392,22 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
     bm25_weight: float | None = None
     include_catalog = req.include_catalog
     route_expand = False
+    rewritten: str | None = None
+    history = getattr(req, "history", None) or []
 
     if s.router_enabled and not find_quote:
-        # history plumbing arrives with 4.3 (follow-up rewrite); until then the
-        # router never sees conversation context, so `followup` cannot fire.
-        decision = route(req.query, s, history_present=False)
+        decision = route(req.query, s, history_present=bool(history))
         query_class = decision.query_class
+        if query_class == "followup" and s.followup_rewrite_enabled:
+            # Rewrite the context-dependent follow-up to a standalone query,
+            # then re-route it so it inherits its underlying class (4.3).
+            rewritten = app.state.followup.rewrite(req.query, history)
+            decision = route(rewritten, s, history_present=False)
+            query_class = decision.query_class
         if decision.find_quote:
             find_quote, query = True, decision.query
         else:
+            query = rewritten if rewritten is not None else query
             bm25_weight = decision.bm25_weight
             include_catalog = decision.include_catalog
             route_expand = decision.expand_query
@@ -406,6 +420,7 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
         return {}, [], "", find_quote, query, {
             "query_class": query_class or "quote",
             "bm25_weight": None, "include_catalog": False,
+            "rewritten_query": rewritten,
         }
 
     explicit = {k: v for k, v in req.filters.model_dump().items()
@@ -433,6 +448,7 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
         "query_class": query_class,
         "bm25_weight": bm25_weight,
         "include_catalog": include_catalog,
+        "rewritten_query": rewritten,
     }
 
 
@@ -528,6 +544,7 @@ def query(req: QueryRequest):
             "find_quote": find_quote,
             "auto_quote": find_quote and not req.find_quote,
             "query_class": route_info["query_class"],
+            "rewritten_query": route_info["rewritten_query"],
             "scope": req.scope,
             "backend": backend,
             "retrieval_ms": retrieval_ms,
@@ -546,6 +563,7 @@ def query(req: QueryRequest):
             "find_quote": find_quote,
             "auto_quote": find_quote and not req.find_quote,
             "query_class": route_info["query_class"],
+            "rewritten_query": route_info["rewritten_query"],
             "scope": req.scope,
             "backend": backend,
             "retrieval_ms": retrieval_ms,
