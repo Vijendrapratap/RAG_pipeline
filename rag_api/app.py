@@ -48,6 +48,7 @@ from rag_api.query_parse import (
     detect_quote, detect_signals, merge_filters, signals_to_filters,
 )
 from rag_api.retrieval import Retriever
+from rag_api.route import route
 from rag_api.synthesis import Synthesizer
 
 logging.basicConfig(
@@ -321,7 +322,7 @@ def _retrieve(
     retriever: Retriever, pageindex: PageIndexRetriever, query: str,
     find_quote: bool, scope: str, backend: str,
     filters: dict[str, Any], top_k: int, dense_text: str,
-    include_catalog: bool = False,
+    include_catalog: bool = False, bm25_weight: float | None = None,
 ) -> list[dict[str, Any]]:
     """Route a retrieval request to the right pipeline. `find_quote` is always
     a chunk-level lexical quote hunt (hybrid only — PageIndex has no lexical
@@ -346,16 +347,17 @@ def _retrieve(
         return retriever.search_two_stage(query, filters, top_k, dense_text=dt)
     if scope == "catalog":
         return retriever.search_catalog(query, filters, top_k, dense_text=dt)
-    return retriever.search(query, filters, top_k, dense_text=dt,
-                            include_catalog=include_catalog)
+    return retriever.search(query, filters, top_k, bm25_weight=bm25_weight,
+                            dense_text=dt, include_catalog=include_catalog)
 
 
 def _prepare(req: SearchRequest | QueryRequest) -> tuple[
-    dict[str, Any], list[dict[str, Any]], str, bool, str
+    dict[str, Any], list[dict[str, Any]], str, bool, str, dict[str, Any]
 ]:
     """Phase-D pre-retrieval planning, shared by /api/search and /api/query.
 
-    Returns ``(effective_filters, detections, dense_text, find_quote, query)``:
+    Returns ``(effective_filters, detections, dense_text, find_quote, query,
+    route_info)``:
       * effective_filters — explicit request filters merged with auto-extracted
         strong signals (explicit always wins);
       * detections — every signal found in the query text, for the UI to show
@@ -366,22 +368,44 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
         when the query is a pasted Devanagari verbatim passage;
       * query — the text to retrieve with: the original, or (when a quote is
         auto-detected) the quote with its trailing romanized question stripped.
+      * route_info — ``{query_class, bm25_weight, include_catalog}``. When the
+        Stage 4.1 router is off (default), it just echoes the request's
+        `include_catalog` with no class/weight override, so the pipeline is
+        byte-for-byte unchanged. When on, per-class settings from
+        `rag_api.route` take effect (catalog off, per-class BM25 weight).
 
     A `find_quote` request — explicit or auto-detected — skips filters and HyDE:
     it is a lexical exact-phrase hunt, so metadata filters and semantic
     expansion do not apply. (Synthesis/language detection still use the caller's
     original query, so the model answers the user's actual question.)
     """
+    s: Settings = app.state.settings
     find_quote, query = req.find_quote, req.query
-    if not find_quote:
+    query_class: str | None = None
+    bm25_weight: float | None = None
+    include_catalog = req.include_catalog
+
+    if s.router_enabled and not find_quote:
+        # history plumbing arrives with 4.3 (follow-up rewrite); until then the
+        # router never sees conversation context, so `followup` cannot fire.
+        decision = route(req.query, s, history_present=False)
+        query_class = decision.query_class
+        if decision.find_quote:
+            find_quote, query = True, decision.query
+        else:
+            bm25_weight = decision.bm25_weight
+            include_catalog = decision.include_catalog
+    elif not find_quote:
         qd = detect_quote(req.query)
         if qd.is_quote:
             find_quote, query = True, qd.query
 
     if find_quote:
-        return {}, [], "", find_quote, query
+        return {}, [], "", find_quote, query, {
+            "query_class": query_class or "quote",
+            "bm25_weight": None, "include_catalog": False,
+        }
 
-    s: Settings = app.state.settings
     explicit = {k: v for k, v in req.filters.model_dump().items()
                 if v is not None}
     vocab = app.state.vocab_cache.get(s.pg_dsn)
@@ -401,7 +425,11 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
     if req.expand_query:
         dense_text = app.state.retriever.make_expansion(req.query)
 
-    return effective, detections, dense_text, find_quote, query
+    return effective, detections, dense_text, find_quote, query, {
+        "query_class": query_class,
+        "bm25_weight": bm25_weight,
+        "include_catalog": include_catalog,
+    }
 
 
 @app.post("/api/search", dependencies=[Depends(require_auth)])
@@ -411,12 +439,13 @@ def search(req: SearchRequest) -> dict[str, Any]:
     retriever: Retriever = app.state.retriever
     pageindex: PageIndexRetriever = app.state.pageindex
     backend = _resolve_backend(req)
-    effective, detections, dense_text, find_quote, rquery = _prepare(req)
+    effective, detections, dense_text, find_quote, rquery, route_info = _prepare(req)
     t0 = time.monotonic()
     try:
         results = _retrieve(retriever, pageindex, rquery, find_quote,
                             req.scope, backend, effective, req.top_k, dense_text,
-                            include_catalog=req.include_catalog)
+                            include_catalog=route_info["include_catalog"],
+                            bm25_weight=route_info["bm25_weight"])
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")
@@ -428,6 +457,7 @@ def search(req: SearchRequest) -> dict[str, Any]:
         "query": req.query,
         "find_quote": find_quote,
         "auto_quote": find_quote and not req.find_quote,
+        "query_class": route_info["query_class"],
         "scope": req.scope,
         "backend": backend,
         "retrieval_ms": retrieval_ms,
@@ -463,12 +493,13 @@ def query(req: QueryRequest):
     override_provider, override_model = _resolve_model_choice(req)
 
     backend = _resolve_backend(req)
-    effective, detections, dense_text, find_quote, rquery = _prepare(req)
+    effective, detections, dense_text, find_quote, rquery, route_info = _prepare(req)
     t0 = time.monotonic()
     try:
         results = _retrieve(retriever, pageindex, rquery, find_quote,
                             req.scope, backend, effective, req.top_k, dense_text,
-                            include_catalog=req.include_catalog)
+                            include_catalog=route_info["include_catalog"],
+                            bm25_weight=route_info["bm25_weight"])
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")
@@ -492,6 +523,7 @@ def query(req: QueryRequest):
             "query": req.query,
             "find_quote": find_quote,
             "auto_quote": find_quote and not req.find_quote,
+            "query_class": route_info["query_class"],
             "scope": req.scope,
             "backend": backend,
             "retrieval_ms": retrieval_ms,
@@ -509,6 +541,7 @@ def query(req: QueryRequest):
             "query": req.query,
             "find_quote": find_quote,
             "auto_quote": find_quote and not req.find_quote,
+            "query_class": route_info["query_class"],
             "scope": req.scope,
             "backend": backend,
             "retrieval_ms": retrieval_ms,
