@@ -243,6 +243,13 @@ class Settings(BaseModel):
     # pipeline is unchanged until an A/B proves the win. See rag_api.route.
     router_enabled: bool = os.environ.get("RAG_ROUTER", "off").lower() in (
         "1", "true", "yes", "on")
+    # Stage 4.2: let the router turn HyDE expansion on for the `thematic` class
+    # only (helps vague conceptual queries, hurts precise quote/name lookups).
+    # Requires router_enabled. Default off: HyDE adds a ~1 s chat round-trip per
+    # thematic query, and the accuracy win is unproven without a discriminating
+    # thematic golden set — so it stays off until an A/B certifies it.
+    hyde_thematic_enabled: bool = os.environ.get(
+        "RAG_HYDE_THEMATIC", "off").lower() in ("1", "true", "yes", "on")
     http_timeout_s: float = float(os.environ.get("HTTP_TIMEOUT_S", "30"))
     # Two-stage retrieval: how many files stage 1 (summary search) keeps
     # before drilling into their chunks in stage 2.

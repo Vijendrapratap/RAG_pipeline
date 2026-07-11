@@ -384,6 +384,7 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
     query_class: str | None = None
     bm25_weight: float | None = None
     include_catalog = req.include_catalog
+    route_expand = False
 
     if s.router_enabled and not find_quote:
         # history plumbing arrives with 4.3 (follow-up rewrite); until then the
@@ -395,6 +396,7 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
         else:
             bm25_weight = decision.bm25_weight
             include_catalog = decision.include_catalog
+            route_expand = decision.expand_query
     elif not find_quote:
         qd = detect_quote(req.query)
         if qd.is_quote:
@@ -421,8 +423,10 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
             effective["date_range"] = (f"{y}-01-01", f"{y}-12-31")
     effective.pop("year", None)
 
+    # HyDE fires when the caller asks (expand_query) or when the router flags a
+    # thematic query and RAG_HYDE_THEMATIC is on (4.2). One ~1 s chat round-trip.
     dense_text = ""
-    if req.expand_query:
+    if req.expand_query or (route_expand and s.hyde_thematic_enabled):
         dense_text = app.state.retriever.make_expansion(req.query)
 
     return effective, detections, dense_text, find_quote, query, {
