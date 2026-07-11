@@ -233,6 +233,16 @@ class Settings(BaseModel):
     quote_bm25_weight: float = float(
         os.environ.get("RAG_QUOTE_BM25_WEIGHT", "0.85")
     )
+    # Per-class BM25 weight for the `name` (person-lookup) class — lexical, so
+    # a touch heavier than the thematic default. Stage 4.1 starting value.
+    name_bm25_weight: float = float(
+        os.environ.get("RAG_NAME_BM25_WEIGHT", "0.75")
+    )
+    # Stage 4.1 query router. Default off: the deterministic classifier +
+    # per-class retrieval settings only engage when this is on, so the default
+    # pipeline is unchanged until an A/B proves the win. See rag_api.route.
+    router_enabled: bool = os.environ.get("RAG_ROUTER", "off").lower() in (
+        "1", "true", "yes", "on")
     http_timeout_s: float = float(os.environ.get("HTTP_TIMEOUT_S", "30"))
     # Two-stage retrieval: how many files stage 1 (summary search) keeps
     # before drilling into their chunks in stage 2.

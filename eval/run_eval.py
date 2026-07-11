@@ -38,6 +38,7 @@ import yaml
 from rag_api.analytics import Analytics
 from rag_api.config import get_settings
 from rag_api.retrieval import Retriever
+from rag_api.route import route as route_query
 
 HIT_KS = (1, 5, 10)
 # Quote-finding skews BM25 heavier (find_quote spec); qa/topic use the blend.
@@ -64,8 +65,25 @@ def _retrieve(
     top_k: int,
     include_catalog: bool,
     bm25_weight_override: float | None,
-) -> list[dict[str, Any]]:
-    """One embed -> dense+bm25 -> RRF -> rerank pass, best-first result dicts."""
+    route_enabled: bool = False,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """One embed -> dense+bm25 -> RRF -> rerank pass, best-first result dicts.
+
+    Returns ``(results, predicted_class)``. When `route_enabled`, the Stage 4.1
+    deterministic router classifies the query text and picks its per-class
+    settings (catalog off, per-class BM25 weight, quote→find_quote path) —
+    simulating the live `/api/query` router instead of the type-hinted
+    `BM25_WEIGHT_BY_TYPE`. `predicted_class` is None in the non-routed path.
+    """
+    if route_enabled:
+        decision = route_query(query, retriever.settings)
+        if decision.find_quote:
+            return retriever.find_quote(decision.query, top_k), decision.query_class
+        return retriever.search(
+            query, filters=None, top_k=top_k,
+            bm25_weight=decision.bm25_weight,
+            include_catalog=decision.include_catalog,
+        ), decision.query_class
     weight = (
         bm25_weight_override if bm25_weight_override is not None
         else BM25_WEIGHT_BY_TYPE.get(qtype, 0.65)
@@ -73,7 +91,7 @@ def _retrieve(
     return retriever.search(
         query, filters=None, top_k=top_k,
         bm25_weight=weight, include_catalog=include_catalog,
-    )
+    ), None
 
 
 def _abstained(results: list[dict[str, Any]], cite_min_score: float) -> bool:
@@ -230,6 +248,7 @@ def run(
     cite_min_score: float,
     include_catalog: bool,
     bm25_weight_override: float | None,
+    route_enabled: bool = False,
 ) -> tuple[dict[str, Any], Path]:
     queries = yaml.safe_load(queries_path.read_text(encoding="utf-8"))
     if not isinstance(queries, list) or not queries:
@@ -245,8 +264,10 @@ def run(
         record: dict[str, Any] = {"id": qid, "type": qtype}
         try:
             if qtype in ("quote", "qa"):
-                results = _retrieve(retriever, q["query"], qtype, top_k,
-                                    include_catalog, bm25_weight_override)
+                results, pred_class = _retrieve(retriever, q["query"], qtype,
+                                    top_k, include_catalog, bm25_weight_override,
+                                    route_enabled)
+                record["predicted_class"] = pred_class
                 rank = _match_quote_or_qa(
                     results, q["expected_source_file"],
                     q["expected_chunk_contains"],
@@ -265,8 +286,10 @@ def run(
                     else f"no match in top {len(results)}"
                 )
             elif qtype == "topic":
-                results = _retrieve(retriever, q["query"], qtype, top_k,
-                                    include_catalog, bm25_weight_override)
+                results, pred_class = _retrieve(retriever, q["query"], qtype,
+                                    top_k, include_catalog, bm25_weight_override,
+                                    route_enabled)
+                record["predicted_class"] = pred_class
                 expected = q["expected_source_files"]
                 mode = q.get("match", "all")
                 record["n_results"] = len(results)
@@ -296,8 +319,10 @@ def run(
                     round(float(results[0]["score"]), 4) if results else 0.0
                 )
             elif qtype == "negative":
-                results = _retrieve(retriever, q["query"], "negative", top_k,
-                                    include_catalog, bm25_weight_override)
+                results, pred_class = _retrieve(retriever, q["query"],
+                                    "negative", top_k, include_catalog,
+                                    bm25_weight_override, route_enabled)
+                record["predicted_class"] = pred_class
                 abstained = _abstained(results, cite_min_score)
                 record["n_results"] = len(results)
                 record["abstained"] = abstained
@@ -337,6 +362,7 @@ def run(
             "include_catalog": include_catalog,
             "bm25_weight_override": bm25_weight_override,
             "bm25_weight_by_type": BM25_WEIGHT_BY_TYPE,
+            "route_enabled": route_enabled,
         },
         "total_queries": len(per_query),
         "by_type": _aggregate(per_query),
@@ -356,7 +382,8 @@ def _print_summary(report: dict[str, Any], out_path: Path) -> None:
     print(f"\nEval report: {out_path}")
     print(f"Total queries: {report['total_queries']}  "
           f"(cite_min_score={report['params']['cite_min_score']}, "
-          f"include_catalog={report['params']['include_catalog']})")
+          f"include_catalog={report['params']['include_catalog']}, "
+          f"route={report['params'].get('route_enabled')})")
     for t, m in report["by_type"].items():
         if t in RETRIEVAL_TYPES:
             print(f"  {t:9s} n={m['n']:2d}  "
@@ -389,6 +416,10 @@ def main(argv: list[str] | None = None) -> int:
                         "(defaults off — set explicitly per plan 3.3).")
     p.add_argument("--bm25-weight", type=float, default=None,
                    help="Override the per-type BM25 weight for all query types.")
+    p.add_argument("--route", action="store_true",
+                   help="Simulate the Stage 4.1 router: classify each query and "
+                        "apply its per-class settings (catalog off, per-class "
+                        "bm25, quote->find_quote) instead of the type hint.")
     p.add_argument("--quote-hit5-threshold", type=float, default=0.80,
                    help="CI gate: quote-type Hit@5 must be >= this (PRD 0.80).")
     args = p.parse_args(argv)
@@ -402,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
         top_k=args.top_k, cite_min_score=cite_min_score,
         include_catalog=args.include_catalog,
         bm25_weight_override=args.bm25_weight,
+        route_enabled=args.route,
     )
     _print_summary(report, out_path)
 
