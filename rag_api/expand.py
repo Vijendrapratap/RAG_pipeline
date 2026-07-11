@@ -80,6 +80,12 @@ class QueryExpander:
                         {"role": "user", "content": prompt},
                     ],
                     "stream": False,
+                    # think=False: chat_model (qwen3.5:9b) is a thinking model;
+                    # without this it prepends a reasoning chain that pollutes the
+                    # hypothetical passage and degrades the very embedding HyDE is
+                    # meant to sharpen. Safe on non-thinking models too. Same
+                    # gotcha fixed in pageindex.py / the enrichment path.
+                    "think": False,
                     # A hypothetical passage is short — cap context and output
                     # so expansion stays cheap relative to answer generation.
                     "options": {
