@@ -1,0 +1,159 @@
+# Stage 4.1.a — labeled router eval set: {query, expected_class[, history_present]}.
+#
+# The golden set (golden_queries_corpus.yaml) is typed quote/topic/negative/
+# analytics — that is NOT the router's label space. The router classifies each
+# incoming query into one of five *shapes*:
+#
+#   name     — a lookup ABOUT a specific named person (discourse subject).
+#   quote    — a pasted verbatim Devanagari passage the user wants LOCATED.
+#   thematic — a conceptual / abstract question (the default fallthrough).
+#   analytic — an explicit count / list / enumerate intent.
+#   followup — a context-dependent continuation; only meaningful WITH history.
+#
+# Class is orthogonal to answerability: a name-shaped query about an invented
+# person is still `name` (abstention is the citation floor's job, not the
+# router's). So this set labels by SHAPE, and includes boundary cases the
+# deterministic core is expected to find hard — notably concept-vs-person
+# "X के बारे में" pairs (नीलिमा the devotee vs क्रोध the concept are structurally
+# identical; a rule with no people-vocab will confuse them, and that is
+# reported honestly, not hidden). See docs/stage4_kickoff.md §4.1.
+#
+# `history_present: true` marks a query that arrives mid-conversation; the
+# router only emits `followup` when history is present AND the query has an
+# anaphoric / continuation shape.
+
+# ---- name: person-lookup (seeded from golden entity positives) -----------
+- id: name01
+  query: पुरन सिंह के बारे में स्वामी जी ने क्या कहा है
+  expected_class: name
+- id: name02
+  query: पुरुषोत्तम जी के बारे में किस सिटिंग में बताया गया है
+  expected_class: name
+- id: name03
+  query: नामदेव की कथा स्वामी जी ने कहाँ सुनाई है
+  expected_class: name
+- id: name04
+  query: स्वामी रामतीर्थ की कहानी किस प्रवचन में है
+  expected_class: name
+- id: name05
+  query: स्वामी विवेकानंद के बारे में स्वामी जी ने विस्तार से कहाँ बताया
+  expected_class: name
+- id: name06
+  query: चेतन विश्वास के बारे में स्वामी जी ने क्या कहा
+  expected_class: name
+- id: name07
+  query: आशीष जी के बारे में स्वामी जी ने क्या कहा है
+  expected_class: name
+- id: name08
+  query: नीलिमा का कोई ज़िक्र किन प्रवचनों में है
+  expected_class: name
+  note: single-word devotee name, no honorific/suffix — the hard miss a
+    people-vocab would fix; structural rule is expected to under-recall here.
+- id: name09
+  query: कबीर दास के दोहे किस प्रवचन में समझाए गए हैं
+  expected_class: name
+- id: name10
+  query: who was Swami Rama Tirtha and what did the teacher say about him
+  expected_class: name
+
+# ---- quote: pasted verbatim passage (seeded from golden quotes) ----------
+- id: quote01
+  query: जोड़। अपने स्रूत से कोंनेक्शन जोड़। अपनी थर्ड आई से देख। और उस रोशनी को महसूस कर जो भीतर से उठ रही है
+  expected_class: quote
+- id: quote02
+  query: इसको रंग लगाते हैं, इसको आबाद करके जाते हैं, इसकी कीमत पूरी अदा करके ही यहाँ से रुख़्सत होते हैं
+  expected_class: quote
+- id: quote03
+  query: के इस जाल से आजाद होते चलना। वही है एक मात्र दिशा, जहाँ तुझे अपने होने का असली अर्थ मिलेगा
+  expected_class: quote
+- id: quote04
+  query: मीडिटेशन। जिसका रसायन हो। और प्रेम। जिसका रस हो। वो भला किस बात की कमी महसूस करेगा इस जीवन में
+  expected_class: quote
+- id: quote05
+  query: में, कोई परवाह नहीं, उसे कुछ मालूम नहीं, दिवानीगी है, शिकर है, वो अपने महबूब की गली का दिवाना है
+  expected_class: quote
+
+# ---- thematic: conceptual questions (the default fallthrough) ------------
+- id: them01
+  query: क्रोध के बारे में स्वामी जी ने क्या कहा है
+  expected_class: thematic
+  note: structurally identical to a `name` query ("X के बारे में क्या कहा"),
+    but क्रोध is a concept, not a person — the name/thematic boundary.
+- id: them02
+  query: ध्यान कैसे करना चाहिए
+  expected_class: thematic
+- id: them03
+  query: मन को शांत कैसे करें
+  expected_class: thematic
+- id: them04
+  query: प्रेम और भक्ति में क्या अंतर है
+  expected_class: thematic
+- id: them05
+  query: what does the teacher say about overcoming fear
+  expected_class: thematic
+- id: them06
+  query: समर्पण का असली अर्थ क्या है
+  expected_class: thematic
+- id: them07
+  query: वैराग्य क्या होता है और इसे कैसे साधें
+  expected_class: thematic
+- id: them08
+  query: how does one quiet the restless mind in meditation
+  expected_class: thematic
+- id: them09
+  query: अहंकार को कैसे छोड़ा जाए
+  expected_class: thematic
+
+# ---- analytic: count / list / enumerate ---------------------------------
+- id: anly01
+  query: how many discourses mention Nanak
+  expected_class: analytic
+- id: anly02
+  query: list all the sittings recorded in Dagshai in 2003
+  expected_class: analytic
+- id: anly03
+  query: स्वामी जी ने कितनी बार पुरन सिंह का ज़िक्र किया है
+  expected_class: analytic
+  note: contains the name cue "का ज़िक्र" but the intent word "कितनी बार"
+    (how many times) makes it analytic — analytic must win over name.
+- id: anly04
+  query: नामदेव का ज़िक्र कितने प्रवचनों में है
+  expected_class: analytic
+- id: anly05
+  query: which speakers most often talk about प्रेम
+  expected_class: analytic
+- id: anly06
+  query: count the transcripts that reference विवेकानंद
+  expected_class: analytic
+
+# ---- followup: anaphoric continuation (needs history) -------------------
+- id: foll01
+  query: what about his early life
+  expected_class: followup
+  history_present: true
+- id: foll02
+  query: उसके बाद क्या हुआ
+  expected_class: followup
+  history_present: true
+- id: foll03
+  query: and where else did he say this
+  expected_class: followup
+  history_present: true
+- id: foll04
+  query: उसी सिटिंग में और क्या बताया गया
+  expected_class: followup
+  history_present: true
+- id: foll05
+  query: tell me more about that
+  expected_class: followup
+  history_present: true
+- id: foll06
+  query: इसके बारे में और विस्तार से बताइए
+  expected_class: followup
+  history_present: true
+- id: foll07
+  query: what about his early life
+  expected_class: thematic
+  history_present: false
+  note: same text as foll01 but NO history — an anaphoric shape with nothing
+    to resolve against falls through to the default class, not followup.
