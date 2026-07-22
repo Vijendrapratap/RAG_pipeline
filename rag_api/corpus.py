@@ -54,6 +54,11 @@ MAX_PREFIX_LEN = 512
 Row = tuple[str, int, float | None, Any]
 
 
+def _iso(d: Any) -> Any:
+    """JSON-safe form of a date/datetime (or pass through anything else)."""
+    return d.isoformat() if hasattr(d, "isoformat") else d
+
+
 def track_state(source_file: str, chunk_count: int, session_date: Any) -> CState:
     """The state of one track. A key with no '/' has no place in the archive —
     it cannot be located, so it is broken regardless of how many chunks it has."""
@@ -108,10 +113,7 @@ def build_nodes(rows: Iterable[Row], prefix: str = "", depth: int = 1) -> list[d
             node["duration_sec"] += duration_sec or 0.0
             node[st] += 1
             if is_leaf:
-                node["session_date"] = (
-                    session_date.isoformat() if hasattr(session_date, "isoformat")
-                    else session_date
-                )
+                node["session_date"] = _iso(session_date)
 
     # Folders before files, then alphabetically — the order a person scans in.
     return sorted(out.values(), key=lambda n: (n["depth"], n["is_leaf"], n["name"]))
@@ -134,9 +136,6 @@ def summarize(rows: Iterable[Row]) -> dict[str, Any]:
             degenerate.append(source_file)
         if session_date is not None:
             dates.append(session_date)
-
-    def _iso(d: Any) -> str | None:
-        return d.isoformat() if hasattr(d, "isoformat") else d
 
     return {
         "n_files": n_files,
@@ -226,10 +225,7 @@ class CorpusReader:
         version, _, _, max_ingested = self._version()
         out = summarize(self._rows(version))
         out["version"] = version
-        out["max_ingested_at"] = (
-            max_ingested.isoformat() if hasattr(max_ingested, "isoformat")
-            else max_ingested
-        )
+        out["max_ingested_at"] = _iso(max_ingested)
         return out
 
     def state(self, prefix: str = "", depth: int = 1) -> dict[str, Any]:

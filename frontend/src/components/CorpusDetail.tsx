@@ -1,4 +1,6 @@
-import type { CorpusNode, CorpusSummary } from "../corpus";
+import { memo } from "react";
+
+import type { CorpusNode } from "../corpus";
 import {
   STATE_COLOR, STATE_LABEL, formatCount, formatDuration, levelName, nodeState,
 } from "../corpus";
@@ -6,15 +8,15 @@ import { TrackPanel } from "./TrackPanel";
 
 interface Props {
   node: CorpusNode | null;
-  summary: CorpusSummary | null;
-  /** Direct children of `node`, when it is a folder. */
+  /** Direct children of `node`, when it is a folder. Must be referentially stable
+   *  across renders, or `memo` below buys nothing. */
   childNodes: CorpusNode[];
   loading: boolean;
   onOpen: (node: CorpusNode) => void;
   onAuthFail: () => void;
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+export function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="brain-stat">
       <div className="brain-stat-value">{value}</div>
@@ -24,73 +26,31 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 /** Plain-language date. "2002-03-26" helps nobody read a shelf of tapes. */
-function humanDate(iso: string | null): string {
+export function humanDate(iso: string | null): string {
   if (!iso) return "Date unknown";
   const d = new Date(iso + "T00:00:00");
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
 }
 
-function ArchiveOverview({ summary }: { summary: CorpusSummary }) {
-  const undated = summary.n_written;
-  return (
-    <>
-      <div className="brain-detail-kicker">The whole archive</div>
-      <h2 className="brain-detail-title">Everything added to search</h2>
-      <div className="brain-stats">
-        <Stat label="recordings" value={formatCount(summary.n_files)} />
-        <Stat label="passages" value={formatCount(summary.n_chunks)} />
-        <Stat label="of audio" value={formatDuration(summary.duration_sec)} />
-      </div>
-      <p className="brain-detail-line">
-        Spanning <strong>{humanDate(summary.min_session_date)}</strong> to{" "}
-        <strong>{humanDate(summary.max_session_date)}</strong>.
-      </p>
-      {undated > 0 && (
-        <p className="brain-detail-line muted">
-          {formatCount(undated)} recordings are searchable but carry no date — their
-          folder never said when they were recorded.
-        </p>
-      )}
-      {summary.n_failed > 0 && (
-        <div className="brain-alert">
-          <div className="brain-alert-title">
-            {summary.n_failed} {summary.n_failed === 1 ? "recording is" : "recordings are"} broken
-          </div>
-          <p>
-            These were indexed under a bare filename with no folder, so nothing can
-            say which camp or day they belong to.
-          </p>
-          <ul className="brain-alert-list">
-            {summary.degenerate_files.map((f) => (
-              <li key={f}><code>{f}</code></li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <p className="brain-detail-hint">
-        Click a cluster to open it and see inside. Click a single recording to
-        play it and read what was said. Scroll to zoom, drag to move.
-      </p>
-    </>
-  );
-}
-
 /**
  * The panel beside the map. Everything here is a fact from `file_meta` restated
  * in plain language — no derived scores, no estimates, nothing the database
  * cannot back up.
+ *
+ * `memo`, and not as a micro-optimisation: this subtree contains `TrackPanel`,
+ * which renders one `<li>` per transcript segment — a few thousand for a two-hour
+ * pravachan. A spacing slider or a panel resize re-renders `BrainView` at pointer
+ * rate, and without this every one of those list items is reconciled each time.
+ *
+ * The archive totals live in `ArchiveHome`, as a sibling. They used to be here,
+ * behind `node === null`, which meant they vanished the moment you clicked
+ * anything.
  */
-export function CorpusDetail({ node, summary, childNodes, loading, onOpen, onAuthFail }: Props) {
-  if (!node) {
-    return (
-      <aside className="brain-detail">
-        {summary
-          ? <ArchiveOverview summary={summary} />
-          : <div className="brain-detail-kicker">Loading the archive…</div>}
-      </aside>
-    );
-  }
+export const CorpusDetail = memo(function CorpusDetail(
+  { node, childNodes, loading, onOpen, onAuthFail }: Props,
+) {
+  if (!node) return null;
 
   const state = nodeState(node);
   const parts = node.path.split("/");
@@ -164,4 +124,4 @@ export function CorpusDetail({ node, summary, childNodes, loading, onOpen, onAut
       )}
     </aside>
   );
-}
+});

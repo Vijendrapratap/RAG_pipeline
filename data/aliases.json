@@ -1,0 +1,22 @@
+{
+  "_notes": {
+    "purpose": "Query-time expansion only. NOTHING here is ever rewritten in body text.",
+    "why": "Swami ji / Gurudev / Sadguru / Guruji are one person (user-confirmed), but हे मेरे गुरुदेव is a bhajan lyric — collapsing the forms in text would corrupt the songs. Rishi ji is a DISTINCT speaker and is never aliased to them.",
+    "glosses": "The `glosses` map is appended at rebuild time from the 4,061 Latin parentheticals normalize_text.strip_latin_glosses() captures. It is empty here until the rebuild writes it."
+  },
+  "speaker_equivalence": [
+    {
+      "canonical": "Swami ji",
+      "surface_forms": ["Swami ji", "Swamiji", "स्वामी जी", "गुरुदेव", "सद्गुरु", "गुरुजी", "Gurudev", "Sadguru", "Guruji", "सतगुरु", "महाराज"],
+      "note": "One person. PRIMARY_SPEAKER stays 'Swami ji' in metadata; these expand a speaker query only."
+    }
+  ],
+  "distinct_speakers": [
+    {
+      "canonical": "Rishi ji",
+      "surface_forms": ["Rishi ji", "रिशी जी", "रिशि जी"],
+      "note": "A genuine second speaker (113 SAMBODHAN titles name him). NEVER aliased to Swami ji."
+    }
+  ],
+  "glosses": {}
+}

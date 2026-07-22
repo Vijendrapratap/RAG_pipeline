@@ -311,6 +311,34 @@ def mean_pool(vectors: list[list[float]]) -> list[float]:
     return [sum(v[i] for v in vectors) / n for i in range(dim)]
 
 
+def merge_result_lists(
+    lists: list[list[dict[str, Any]]], top_k: int,
+) -> list[dict[str, Any]]:
+    """Merge per-variant result lists into one ranked list (multi-query).
+
+    Results are deduped by ``chunk_id`` (falling back to ``source_file`` for
+    summary results, whose id is per-file anyway), keeping the highest-scored
+    copy of each hit, then sorted by score descending and capped at `top_k`.
+
+    Scores come from independent rerank calls (each against its own query
+    variant), but bge-reranker relevance is an absolute-ish [0,1] scale, so
+    max-merge ranks well enough without a second reranker round-trip. Pure —
+    unit-tested.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for results in lists:
+        for r in results or []:
+            key = str(r.get("chunk_id") or r.get("source_file") or id(r))
+            prev = best.get(key)
+            if prev is None or float(r.get("score") or 0.0) > float(
+                    prev.get("score") or 0.0):
+                best[key] = r
+    merged = sorted(
+        best.values(), key=lambda r: float(r.get("score") or 0.0), reverse=True
+    )
+    return merged[:top_k]
+
+
 def collect_sitting_bodies(
     candidates: list[tuple[str, float, dict[str, Any]]],
 ) -> dict[str, str]:
@@ -912,3 +940,66 @@ class Retriever:
         chunk_filters = dict(filters)
         chunk_filters["source_file"] = files  # list -> OR filter in stage 2
         return self.search(query, chunk_filters, top_k, dense_text=dense_text)
+
+    # ---- multi-query retrieval (planner variants) ------------------------
+
+    def search_multi(
+        self,
+        queries: list[str],
+        filters: dict[str, Any] | None = None,
+        top_k: int = 8,
+        bm25_weight: float | None = None,
+        dense_text: str | None = None,
+        include_catalog: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Hybrid chunk search over several query variants, merged.
+
+        The planner supplies bilingual/synonym variants of one question
+        ("rain" / "barish" / "बारिश"); each runs through the unchanged
+        `search` pipeline and the per-variant lists are max-merged by
+        `merge_result_lists`. `dense_text` (HyDE) applies to the first
+        (original) query only. A failing variant is logged and skipped —
+        one bad translation must not sink the request.
+        """
+        lists: list[list[dict[str, Any]]] = []
+        last_exc: requests.RequestException | None = None
+        for i, q in enumerate(qs for qs in queries if (qs or "").strip()):
+            try:
+                lists.append(self.search(
+                    q, filters, top_k, bm25_weight=bm25_weight,
+                    dense_text=dense_text if i == 0 else None,
+                    include_catalog=include_catalog,
+                ))
+            except requests.RequestException as e:
+                last_exc = e
+                log.warning("multi-query variant %r failed: %s — skipped", q, e)
+        if not lists and last_exc is not None:
+            # Every variant failed: that is an upstream outage, not an empty
+            # corpus — surface it like the single-query path (502), never let
+            # it read as an abstention.
+            raise last_exc
+        return merge_result_lists(lists, top_k)
+
+    def search_summaries_multi(
+        self,
+        queries: list[str],
+        filters: dict[str, Any] | None = None,
+        top_k: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Sitting-level (summary) search over several query variants, merged.
+
+        Powers the planner's `list_sittings` intent ("10 sittings about
+        rain"): one result per transcript file, merged across variants by
+        source file with the best score kept.
+        """
+        lists: list[list[dict[str, Any]]] = []
+        last_exc: requests.RequestException | None = None
+        for q in (qs for qs in queries if (qs or "").strip()):
+            try:
+                lists.append(self.search_summaries(q, filters, top_k))
+            except requests.RequestException as e:
+                last_exc = e
+                log.warning("summary variant %r failed: %s — skipped", q, e)
+        if not lists and last_exc is not None:
+            raise last_exc
+        return merge_result_lists(lists, top_k)

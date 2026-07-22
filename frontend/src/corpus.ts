@@ -9,13 +9,33 @@
  */
 
 /**
- * Depth of the tree fetched up front: collections, their groups, and the
- * sittings inside them. ~1,950 nodes in one 430 KB request.
+ * Depth of the tree fetched up front: the collections *and* their groups. ~190
+ * nodes in one ~40 KB request.
  *
- * Shared with `canExpand` below, because "can this be opened?" is exactly the
- * question "is anything below it not already on screen?".
+ * Exactly one level deeper than `REVEAL_DEPTH`, on purpose. First paint draws
+ * only the collections; the level below them is already in hand, so the first
+ * click opens instantly instead of waiting on the network. Every click after
+ * that costs one `depth=1` request.
+ *
+ * It was 3 (~1,950 nodes, ~430 KB) while the map drew every node it had ever
+ * fetched.
  */
-export const SKELETON_DEPTH = 3;
+export const PREFETCH_DEPTH = 2;
+
+/**
+ * Nodes at or above this depth are always drawn. Below it, only what is open.
+ *
+ * 1: the whole archive is its collections, and nothing else. It was 2, which
+ * put all ~190 groups on the disc at once — a solid outer smear — and made
+ * clicking a collection a visual no-op, because its children were already on
+ * screen and its grandchildren needed the *group* opened. One click, one level:
+ * that is the only rule a reader should have to learn.
+ */
+export const REVEAL_DEPTH = 1;
+
+/** Ceiling on `nodeRadius`. The ring-gap floor is derived from it: two dots on
+ *  adjacent rings cannot touch while the rings are `2 * MAX_NODE_RADIUS` apart. */
+export const MAX_NODE_RADIUS = 22;
 
 /** A node's dominant state. Containers take the state of their majority. */
 export type CState = "remembered" | "written" | "failed";
@@ -114,7 +134,7 @@ export function litRatio(n: CorpusNode): number {
 export function nodeRadius(n: CorpusNode, isRoot = false): number {
   if (isRoot) return 14;
   const magnitude = n.n_chunks > 0 ? n.n_chunks : n.n_files;
-  return Math.min(22, 2.2 + Math.sqrt(magnitude) * 0.7);
+  return Math.min(MAX_NODE_RADIUS, 2.2 + Math.sqrt(magnitude) * 0.7);
 }
 
 const HOUR = 3600;
@@ -135,14 +155,15 @@ export function formatCount(n: number): string {
  * Whether this node's children still need fetching.
  *
  * A collection's children came down with the skeleton, so opening one costs a
- * request and reveals nothing new. Note this is *only* about the network — it
- * used to double as "can this node be opened at all", which is why clicking
- * `Dagshai 2001` did nothing whatsoever: depth 1 < SKELETON_DEPTH, so the
+ * request and reveals nothing new. This is *only* about the network — it used to
+ * double as "can this node be opened at all", which is why clicking
+ * `Dagshai 2001` did nothing whatsoever: depth 1 < the prefetch depth, so the
  * handler bailed before it ever moved the camera. Opening is `focusNode`;
- * fetching is this. They are different questions.
+ * fetching is this. They are different questions, and so is *drawing*, which is
+ * `visibleNodes`.
  */
-export function hasHiddenChildren(n: CorpusNode): boolean {
-  return !n.is_leaf && n.depth >= SKELETON_DEPTH;
+export function childrenUnfetched(n: CorpusNode, fetched: ReadonlySet<string>): boolean {
+  return !n.is_leaf && n.depth >= PREFETCH_DEPTH && !fetched.has(n.path);
 }
 
 /** The parent path of a node, or "" at the archive root. */
@@ -155,6 +176,47 @@ export function parentPath(path: string): string {
 export function ancestors(path: string): string[] {
   const parts = path.split("/");
   return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+}
+
+/**
+ * The open branch: the focused node and every ancestor of it.
+ *
+ * Derived from `focusPath`, never stored. That is what makes "collapse" free —
+ * there is no second source of truth to keep in step, `Esc` (which walks
+ * `focusPath` up one level) *is* collapse, and `selectedPath` can never point at
+ * a node the map has stopped drawing.
+ */
+export function spineOf(focusPath: string | null): Set<string> {
+  const open = new Set<string>();
+  if (!focusPath) return open;
+  for (const a of ancestors(focusPath)) open.add(a);
+  open.add(focusPath);
+  return open;
+}
+
+/**
+ * The nodes the map should draw: everything down to `revealDepth`, plus the
+ * children of every open container below it.
+ *
+ * The renderer already knew which nodes were irrelevant — it dimmed them to 10%
+ * opacity — and paid full layout, relaxation, spatial-grid and raster cost to
+ * draw them invisibly. Progressive disclosure is deleting them instead.
+ *
+ * Keyed on `parentPath`, never `startsWith`: `Live Masters 2010` is a string
+ * prefix of `Live Masters 2010 B`, and one rename would make that bug real.
+ */
+export function visibleNodes(
+  all: Iterable<CorpusNode>, open: ReadonlySet<string>, revealDepth: number = REVEAL_DEPTH,
+): CorpusNode[] {
+  const sorted = [...all].sort((a, b) => a.depth - b.depth);
+  const revealed = new Set<string>();
+  const out: CorpusNode[] = [];
+  for (const n of sorted) {
+    if (n.depth > revealDepth && !revealed.has(parentPath(n.path))) continue;
+    out.push(n);
+    if (!n.is_leaf && (n.depth < revealDepth || open.has(n.path))) revealed.add(n.path);
+  }
+  return out;
 }
 
 /** The level a node sits at, named the way an archivist would name it.

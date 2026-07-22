@@ -21,6 +21,7 @@ from ingestion.utils.path_parser import (
     PathMetadata,
     month_num,
     parse_path,
+    primary_speaker_for,
     season_for,
     track_type_for,
 )
@@ -95,6 +96,94 @@ def test_track_type_for_known(title: str, expected: str):
 def test_track_type_for_unknown_defaults_to_bhajan(title: str):
     assert track_type_for(title) == DEFAULT_TRACK_TYPE
     assert DEFAULT_TRACK_TYPE == "bhajan"
+
+
+# ---- Phase 17: head-anchored track_type + qa/session/combined -----------
+#
+# Head-anchoring recovers 1,050 of 9,335 tracks the old exact match dropped to
+# 'bhajan' (typed 4,212 -> 5,262), reclassifying zero songs.
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        # A vocab word at the head, followed by "(", "-", a number, or end.
+        ("MEDITATION (WITHOUT OM)", "meditation"),   # 258 tracks
+        ("MEDITATION (INCOMPLETE)", "meditation"),
+        ("MEDITATION - ONLY OM", "meditation"),
+        ("MEDITATION (1)", "meditation"),
+        ("OM GURUVE NAMAH (INCOMPLETE)", "invocation"),
+        ("SAMBODHAN - RISHI JI", "address"),         # 67 tracks
+        ("SAMBODHAN (2)", "address"),
+        ("PRAVACHAN (ZINDAGI KA SAFAR)", "discourse"),
+        ("PRAVACHAN - THIRD STAGE", "discourse"),
+    ],
+)
+def test_track_type_head_anchored_recovers_variants(title, expected):
+    assert track_type_for(title) == expected
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        # A vocab word mid-title is part of a song lyric, not the type.
+        "MEDITATION KI MASTIYON MEIN",   # 13 tracks — a song
+        "MERI SHAM MEDITATION MEIN",     # 12 tracks — MEDITATION is mid-title
+        "STANDING MEDITATION",           # 10 tracks
+        "DHYAN MEIN UTRO",
+    ],
+)
+def test_track_type_does_not_reclassify_songs(title):
+    """The false-positive gate: a real bhajan whose title merely contains a vocab
+    word must stay 'bhajan'. This is why the match is head-anchored, not substring."""
+    assert track_type_for(title) == "bhajan"
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("QUESTION 1", "qa"),
+        ("QUES-01", "qa"),
+        ("QUES - 3", "qa"),
+        ("QUESTION 14 & CHAL MERE DIL", "qa"),   # QUES prefix wins over the song tail
+        ("COMPLETE SITTING", "session"),
+        ("COMPLETE SITTING (SONY RECORDER)", "session"),
+        ("WELCOME SITTING (ONLY VOICE)", "session"),
+    ],
+)
+def test_track_type_qa_and_session_carveouts(title, expected):
+    assert track_type_for(title) == expected
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "SAMBODHAN & PRAVACHAN",       # 35 — address + discourse
+        "PRAVACHAN & SAMBODHAN",       # 33 — order must not matter
+        "MEDITATION & PRAVACHAN",      # 9
+        "SAMBODHAN&PRAVACHAN",         # no spaces, still two types
+    ],
+)
+def test_track_type_combined_for_multi_type_titles(title):
+    """A title naming two distinct activity TYPES is 'combined' — a single-valued
+    field cannot say it is both an address and a discourse."""
+    assert track_type_for(title) == "combined"
+
+
+def test_track_type_two_songs_and_one_type_is_not_combined():
+    """`RUHANI GEET & SAMBODHAN` names a song and an address; only one vocab TYPE
+    is present, so it is not 'combined' — it stays bhajan (the head is a song)."""
+    assert track_type_for("RUHANI GEET & SAMBODHAN") == "bhajan"
+
+
+def test_track_types_frozenset_covers_every_output():
+    """path_parser.TRACK_TYPES is the validation vocabulary; it must contain every
+    value track_type_for can emit and nothing it cannot."""
+    from ingestion.utils.path_parser import TRACK_TYPES
+    for v in ("bhajan", "discourse", "address", "meditation", "invocation",
+              "music", "qa", "session", "combined"):
+        assert v in TRACK_TYPES
+    assert len(TRACK_TYPES) == 9
 
 
 # ---- parse_path: the example from the trigger --------------------------
@@ -427,10 +516,9 @@ def test_model_folder_alone_above_track_still_resolves_track():
     # Track still parses (the file itself):
     assert meta.track_title == "PRAVACHAN IN MEDITATION"
     assert meta.track_no == 3
-    # "PRAVACHAN IN MEDITATION" isn't an exact match for any vocab entry,
-    # so it falls back to the default — consistent with the rest of the
-    # vocab contract.
-    assert meta.track_type == DEFAULT_TRACK_TYPE
+    # "PRAVACHAN IN MEDITATION" names two distinct vocab types (discourse +
+    # meditation), so Phase 17 classifies it 'combined' — it is genuinely both.
+    assert meta.track_type == "combined"
     # No collection/event/session info recoverable — that's acceptable:
     assert meta.collection is None
     assert meta.event_id is None
@@ -511,6 +599,39 @@ def test_primary_speaker_propagates_to_metadata():
     # Even on failure paths:
     meta_bad = parse_path("/nonsense.wav")
     assert meta_bad.primary_speaker == PRIMARY_SPEAKER
+
+
+# ---- Phase 17: Rishi ji is a genuine second speaker -------------------
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("SAMBODHAN - RISHI JI", "Rishi ji"),           # 67 tracks — his
+        ("SAMBODHAN (RISHI JI)", "Rishi ji"),
+        ("SAMBODHAN BY RISHI JI", "Rishi ji"),
+        ("SAMBODHAN - RISHI JI (INCOMPLETE)", "Rishi ji"),
+        # Dual-speaker: Swami ji is genuinely present, field holds one value.
+        ("SAMBODHAN - SWAMI JI - RISHI JI", "Swami ji"),  # 18 tracks
+        ("SAMBODHAN - SWAMI JI & RISHI JI", "Swami ji"),  # 18 tracks
+        # No Rishi ji named -> the default.
+        ("SAMBODHAN", "Swami ji"),
+        ("PRAVACHAN", "Swami ji"),
+        ("MEDITATION (WITHOUT OM)", "Swami ji"),
+    ],
+)
+def test_primary_speaker_for(title, expected):
+    assert primary_speaker_for(title) == expected
+
+
+def test_rishi_speaker_reaches_the_metadata_object():
+    """A SAMBODHAN - RISHI JI track must carry primary_speaker='Rishi ji' so the
+    speaker facet (chunker_json falls back to it) returns his tracks."""
+    p = (f"{_USER_BASE}/Live Masters 2010_isolation/01 NOIDA 7 - 10 JAN 2010_isolation/"
+         "7 JAN - 1$ - 6 PM_isolation/06 SAMBODHAN - RISHI JI.json")
+    meta = parse_path(p, base_dir=_USER_BASE)
+    assert meta.track_title == "SAMBODHAN - RISHI JI"
+    assert meta.primary_speaker == "Rishi ji"
 
 
 # ---- Real corpus shapes: levels identified by shape, not position -----

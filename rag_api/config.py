@@ -17,6 +17,11 @@ from pydantic import BaseModel
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _env_flag(name: str, default: str = "off") -> bool:
+    """Truthy env var — accepts 1/true/yes/on (case-insensitive)."""
+    return os.environ.get(name, default).lower() in ("1", "true", "yes", "on")
+
+
 def _load_dotenv(path: Path) -> None:
     """Populate os.environ from a `.env` file without overriding existing vars.
 
@@ -127,6 +132,26 @@ class Settings(BaseModel):
     synthesis_min_score_ratio: float = float(
         os.environ.get("SYNTH_MIN_SCORE_RATIO", "0.2")
     )
+    # Citation floor for the chat answer flow: only passages scoring strictly
+    # above this (reranker relevance, ~[0,1]) are cited and shown in the UI, and
+    # only they are fed to the answer model. Calibrated from the §0.2 histogram
+    # (eval/results/0_2_score_histogram.md): known-good top hits span 0.04–0.997
+    # (Devanagari median 0.93, cross-script Latin as low as 0.04), so the old 0.75
+    # dropped the single best chunk for ~30% of legitimate queries. 0.03 keeps
+    # 100% of known-good top hits while still trimming the very weakest tail.
+    # 0 disables it. The Stage 3.3 negative-set sweep gives the floor menu:
+    # 0.03–0.10 catches ~40% of invented-entity queries (0% false abstention),
+    # 0.20 → ~60% (~6% false), 0.50 → ~80% (~6% false; the false abstentions
+    # are low-scoring cross-script hits). Deployment ships 0.2 via .env; the
+    # code default stays the permissive 0.03.
+    cite_min_score: float = float(os.environ.get("RAG_CITE_MIN_SCORE", "0.03"))
+    # When true, drop the "keep the single best passage" safety net in
+    # filter_min_score so a query with nothing above cite_min_score truly
+    # abstains (→ NO_CONTEXT_MESSAGE, 0 citations). Code default false (the
+    # always-answer net); deployment turns it ON via .env now that the floor
+    # is certified against the §3.3 negative set — without it the model is
+    # force-fed one irrelevant passage and answers anyway.
+    allow_abstain: bool = _env_flag("RAG_ALLOW_ABSTAIN", "false")
     # Answer generation can take a while — separate, longer timeout.
     chat_timeout_s: float = float(os.environ.get("CHAT_TIMEOUT_S", "300"))
     # Reasoning ("thinking") control for the local ollama provider. Thinking
@@ -228,7 +253,7 @@ class Settings(BaseModel):
 
     # --- Retrieval tuning ---
     candidates_per_source: int = int(os.environ.get("RAG_CANDIDATES", "40"))
-    final_top_k: int = int(os.environ.get("RAG_TOP_K", "8"))
+    final_top_k: int = int(os.environ.get("RAG_TOP_K", "4"))
     bm25_weight: float = float(os.environ.get("RAG_BM25_WEIGHT", "0.65"))
     quote_bm25_weight: float = float(
         os.environ.get("RAG_QUOTE_BM25_WEIGHT", "0.85")
@@ -241,21 +266,47 @@ class Settings(BaseModel):
     # Stage 4.1 query router. Default off: the deterministic classifier +
     # per-class retrieval settings only engage when this is on, so the default
     # pipeline is unchanged until an A/B proves the win. See rag_api.route.
-    router_enabled: bool = os.environ.get("RAG_ROUTER", "off").lower() in (
-        "1", "true", "yes", "on")
+    router_enabled: bool = _env_flag("RAG_ROUTER")
     # Stage 4.2: let the router turn HyDE expansion on for the `thematic` class
     # only (helps vague conceptual queries, hurts precise quote/name lookups).
     # Requires router_enabled. Default off: HyDE adds a ~1 s chat round-trip per
     # thematic query, and the accuracy win is unproven without a discriminating
     # thematic golden set — so it stays off until an A/B certifies it.
-    hyde_thematic_enabled: bool = os.environ.get(
-        "RAG_HYDE_THEMATIC", "off").lower() in ("1", "true", "yes", "on")
+    hyde_thematic_enabled: bool = _env_flag("RAG_HYDE_THEMATIC")
     # Stage 4.3: rewrite a context-dependent follow-up into a standalone query
     # (using request `history`) before retrieval. Requires router_enabled. One
     # think=false chat round-trip, and only when history is present AND the
     # router tags the query `followup`. Default off until an A/B certifies it.
-    followup_rewrite_enabled: bool = os.environ.get(
-        "RAG_FOLLOWUP_REWRITE", "off").lower() in ("1", "true", "yes", "on")
+    followup_rewrite_enabled: bool = _env_flag("RAG_FOLLOWUP_REWRITE")
+    # Post-synthesis groundedness check: one extra think=false chat call that
+    # judges each answer sentence against the retrieved passages and drops
+    # unsupported ones (rag_api.ground). Non-streaming /api/query only — a
+    # token stream cannot be post-edited. Default off: it adds ~1-2 s per
+    # answer, and the faithfulness eval decides whether the fidelity win is
+    # worth it. Fail-open: judge failures never break answering.
+    groundedness_enabled: bool = _env_flag("RAG_GROUNDEDNESS")
+    # Agentic query planner (rag_api.planner): one think=false chat call per
+    # thematic/name/analytic query that (a) detects list intent ("10 sittings
+    # for rain" → sitting-level retrieval + numbered-list answer) and (b) adds
+    # bilingual/synonym retrieval variants ("barish" → बारिश + rain) searched
+    # in parallel and merged. Requires router_enabled. Fail-open: an LLM
+    # failure degrades to the unchanged single-query pipeline. Default off;
+    # deployment flips it via .env.
+    planner_enabled: bool = _env_flag("RAG_PLANNER")
+    # Cap on retrieval query variants per plan (original + N-1 variants).
+    planner_max_queries: int = int(os.environ.get("RAG_PLANNER_MAX_QUERIES", "3"))
+    # Cap on list-intent result count ("100 sittings" still returns <= this).
+    # Also the candidate-pool size for best-sitting ranking.
+    list_top_k: int = int(os.environ.get("RAG_LIST_TOP_K", "20"))
+    # Chitchat via the chat model (default ON): the router's chitchat class is
+    # answered by a short no-retrieval think=false LLM call instead of a fixed
+    # string, so "hi hello what can you do" gets a natural reply. Fail-open:
+    # any model error falls back to the fixed bilingual reply.
+    chitchat_llm_enabled: bool = _env_flag("RAG_CHITCHAT_LLM", "on")
+    # Chunk budget for verbatim-summary turns ("summary of the sitting on X").
+    # The answer quotes exact lines, so more passages = better coverage of the
+    # sitting; the effective top_k is max(request top_k, this).
+    verbatim_top_k: int = int(os.environ.get("RAG_VERBATIM_TOP_K", "10"))
     http_timeout_s: float = float(os.environ.get("HTTP_TIMEOUT_S", "30"))
     # Two-stage retrieval: how many files stage 1 (summary search) keeps
     # before drilling into their chunks in stage 2.

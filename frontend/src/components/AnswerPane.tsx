@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { QueryMeta } from "../types";
@@ -25,19 +25,24 @@ const CITATION_RE = /\[(\d+)\]/g;
 export function AnswerPane({ answer, meta, running, error }: Props) {
   const [flashed, setFlashed] = useState<number | null>(null);
   const [showSources, setShowSources] = useState(!SHOW_CITATIONS_COLLAPSED_BY_DEFAULT);
+  // Per-pane anchor prefix. Every turn in a thread numbers its citations 1..N,
+  // so a bare `cite-N` id collides across turns and getElementById would always
+  // scroll to the FIRST turn's card — this keeps each turn's [N] clicks inside
+  // that turn's own sources.
+  const uid = useId();
 
   const onCite = useCallback((n: number) => {
     // Opening the panel is harmless if it was already open.
     setShowSources(true);
     // Defer the scroll so the citation cards have a frame to mount in.
     window.requestAnimationFrame(() => {
-      const el = document.getElementById(`cite-${n}`);
+      const el = document.getElementById(`${uid}-cite-${n}`);
       if (el) {
         el.scrollIntoView({ behavior: "smooth", block: "center" });
         setFlashed(n);
       }
     });
-  }, []);
+  }, [uid]);
 
   // Clear the highlight pulse so the same citation can flash again later.
   useEffect(() => {
@@ -92,7 +97,9 @@ export function AnswerPane({ answer, meta, running, error }: Props) {
                   key={c.chunk_id}
                   result={c}
                   index={i + 1}
+                  anchorPrefix={uid}
                   highlight={flashed === i + 1}
+                  query={meta!.query}
                 />
               ))}
             </div>

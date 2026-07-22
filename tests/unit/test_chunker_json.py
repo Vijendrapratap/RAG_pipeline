@@ -139,13 +139,50 @@ def test_legit_long_segment_subdivides_to_max_tokens():
         assert max(1, round(c["word_count"] * 1.3)) <= cj.MAX_TOKENS
 
 
-def test_single_oversize_sentence_raises_loudly():
-    # A single "sentence" with no terminator that alone exceeds MAX_TOKENS
-    # cannot be split on sentence boundaries — raise loudly, never truncate.
-    one_sentence = " ".join(f"w{i}" for i in range(2000))  # ~2600 est-tokens, no '.'
-    segs = [{"text": one_sentence, "start": 0.0, "end": 100.0, "speaker": "A"}]
-    with pytest.raises(ValueError):
-        cj.chunk_segments(segs, "runon.json", "whisperx")
+def test_single_oversize_sentence_window_splits_without_truncating(caplog):
+    # Phase 17: a single "sentence" with no terminator that alone exceeds
+    # MAX_TOKENS is a Whisper artifact, not prose. It used to raise and
+    # dead-letter the whole file. It is now window-split on word boundaries and
+    # logged loudly — the file is degraded, not discarded. Nothing is truncated.
+    words = [f"w{i}" for i in range(2000)]  # ~2600 est-tokens, no terminator
+    segs = [{"text": " ".join(words), "start": 0.0, "end": 100.0, "speaker": "A"}]
+    with caplog.at_level("WARNING"):
+        chunks = cj.chunk_segments(segs, "runon.json", "whisperx")
+
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert max(1, round(c["word_count"] * 1.3)) <= cj.MAX_TOKENS
+    assert "window-splitting" in caplog.text
+
+    # Every input word survives exactly once, in order, across the pieces.
+    # (Chunk bodies carry a "[Source: …]" header line; compare the body only.)
+    emitted: list[str] = []
+    for c in chunks:
+        emitted.extend(c["text"].split("\n", 1)[1].split())
+    assert emitted == words
+
+
+def test_single_token_chunk_dropped_and_dead_lettered():
+    # Phase 17: a lone `ओ` spanning 16 s escapes the loop guard (wc=1 is below
+    # MIN_LOOP_WORDS, an exemption that exists to protect short naturally-
+    # repetitive chunks). It carries nothing retrievable and must be dropped.
+    segs = [{"text": "ओ", "start": 10.0, "end": 26.0, "speaker": "A"}]
+    dead: list = []
+    chunks = cj.chunk_segments(segs, "lone.json", "whisperx", dead_letters=dead)
+    assert chunks == []
+    assert len(dead) == 1
+    assert "single_token" in dead[0]["reason"]
+
+
+def test_long_asr_loop_keeps_its_loop_classification():
+    # The single-token guard must not preempt the loop guard: a 5000-word "राम"
+    # loop is one distinct token, but audit_chunks.py keys on the loop ratio, so
+    # it must still dead-letter as `asr_loop`, not `single_token`.
+    segs = [{"text": " ".join(["राम"] * 5000), "start": 0.0, "end": 300.0,
+             "speaker": "A"}]
+    dead: list = []
+    assert cj.chunk_segments(segs, "loop.json", "whisperx", dead_letters=dead) == []
+    assert "asr_loop" in dead[0]["reason"]
 
 
 def test_unicode_preserved_exactly():
@@ -197,7 +234,9 @@ def test_speaker_change_below_min_does_not_flush():
 
 
 def test_header_format():
-    segs = [{"text": "hello", "start": 65.0, "end": 70.0, "speaker": "A"}]
+    # Two words, not one: Phase 17 drops single-token chunks as unretrievable,
+    # and the header format under test here is unrelated to that guard.
+    segs = [{"text": "hello world", "start": 65.0, "end": 70.0, "speaker": "A"}]
     chunks = cj.chunk_segments(segs, "myfile.json", "whisperx")
     head = chunks[0]["text"].splitlines()[0]
     assert head.startswith("[Source: myfile.json")

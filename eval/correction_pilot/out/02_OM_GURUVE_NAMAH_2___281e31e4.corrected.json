@@ -1,0 +1,16 @@
+{
+  "source_file": "Dagshai 2002_isolation/12 DEC - 2002_isolation/DAGSHAI 22 - 26 DEC 2002_isolation/23 DEC - 2$ - 630 AM_isolation/02 OM GURUVE NAMAH (2).cleaned.json",
+  "model": "qwen/qwen3.6-27b",
+  "chars_in": 28,
+  "repetition_score": 0.0,
+  "truncated": false,
+  "error": "",
+  "original_cleaned_text": "हर हर नमो नमो हर हर नमो नमो।",
+  "conservative_text": "हर हर नमो नमो हर हर नमो नमो।",
+  "aggressive_text": "हर हर नमो नमो, हर हर नमो नमो।",
+  "usage": {
+    "prompt_tokens": 490,
+    "completion_tokens": 37,
+    "cost_usd": 0.000228
+  }
+}

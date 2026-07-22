@@ -30,11 +30,30 @@ MAX_TOKENS = 700
 OVERLAP_SENTENCES = 2
 MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
 
+# words -> est. tokens. Calibrated on English; it is NOT conservative for
+# Devanagari. Measured against the real bge-m3 (XLM-R sentencepiece) tokenizer,
+# Hindi runs a median 1.55 tokens/word (tail 1.79), so this *undercounts* and
+# chunks come out larger than MAX_TOKENS nominally allows: 700 est ~= 834 real.
+#
+# The value stays 1.3. Nothing is truncated — bge-m3's context is 8192 and the
+# Infinity reranker uses the model default 8194 (docker-compose.yml sets no
+# --max-length) — so raising it buys no correctness and would re-chunk the whole
+# corpus (~16% smaller chunks, ~19% more of them). MAX_TOKENS/TARGET_TOKENS are
+# PRD-locked chunking parameters; changing the effective chunk size is the same
+# class of decision and needs the same sign-off. This constant exists so the
+# calibration is stated once, in code, rather than mis-stated in two docstrings.
+WORDS_TO_TOKENS = 1.3
+
 # Devanagari prose ends sentences with the danda (।) / double danda (॥), not a
 # Latin '.'. Without them Hindi transcripts collapse into one "sentence" and the
 # packer emits a single oversize chunk — the root of the legit-long chunks 1.2
 # subdivides. The Latin terminators stay so bilingual text still splits.
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?।॥])\s+")
+#
+# The second alternative handles a danda glued to the next word ("वाक्य।दूसरा",
+# 117 occurrences in an 800-file sample), which the whitespace-only rule never
+# split. It is deliberately restricted to the danda: a zero-width split after a
+# Latin '.' would tear apart decimals and abbreviations.
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?।॥])\s+|(?<=[।॥])(?=\S)")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,7 +65,7 @@ log = logging.getLogger("chunker_text")
 def estimate_tokens(text: str) -> int:
     """Heuristic token count: words * 1.3 (English baseline). See chunker_json."""
     words = len(text.split())
-    return max(1, round(words * 1.3))
+    return max(1, round(words * WORDS_TO_TOKENS))
 
 
 def read_text(path: Path) -> str:
@@ -90,10 +109,10 @@ def _build_chunk(
     header = f"[{extra}]\n{base}" if extra else base
     full_text = f"{header}\n{body}"
 
-    # speakers defaults to [PRIMARY_SPEAKER] when path metadata is present
-    # so existing speaker filters work. Per PRD §6 Phase 12 / user
-    # confirmation: every transcript in this corpus is Swami ji's voice.
-    speakers = [PRIMARY_SPEAKER] if path_meta else []
+    # Plain-text path has no diarization, so the title-derived speaker is the
+    # only signal. Mostly Swami ji, but a `SAMBODHAN - RISHI JI` track is his
+    # (PRD Phase 17); keep it consistent with chunker_json's fallback.
+    speakers = [path_meta.primary_speaker or PRIMARY_SPEAKER] if path_meta else []
 
     chunk: dict[str, object] = {
         "text": full_text,

@@ -3,10 +3,17 @@ from __future__ import annotations
 
 from rag_api.lang import LANG_ENGLISH, LANG_HINDI
 from rag_api.synthesis import (
+    CHITCHAT_MESSAGE,
     NO_CONTEXT_MESSAGE,
+    build_best_question,
+    build_chitchat_system,
     build_context_block,
+    build_list_question,
     build_system_prompt,
     build_user_prompt,
+    build_verbatim_question,
+    chitchat_reply,
+    filter_min_score,
     trim_by_relevance,
 )
 
@@ -43,6 +50,47 @@ def test_context_block_marks_missing_timestamps():
 
 def test_context_block_empty_results():
     assert "no transcript passages" in build_context_block([]).lower()
+
+
+def test_context_block_carries_best_ranking_stats():
+    # Best-sitting results (rag_api.best) stash their ranking rationale in
+    # metadata; the context block must surface it so the model can explain
+    # why a sitting ranks where it does.
+    results = [{
+        "chunk_id": None, "score": 0.83, "text": "sitting summary",
+        "source_file": "f.json", "start_sec": None, "end_sec": None,
+        "speakers": [],
+        "metadata": {"mention_count": 12, "duration_min": 61.5,
+                     "play_count": 3},
+    }]
+    block = build_context_block(results)
+    assert "Mentions: 12" in block
+    assert "Length (min): 61.5" in block
+    assert "Plays: 3" in block
+
+
+def test_verbatim_question_demands_exact_untranslated_quotes():
+    q = build_verbatim_question("summary of the sitting on rain", LANG_ENGLISH)
+    assert 'The user asked: "summary of the sitting on rain"' in q
+    assert "word-for-word" in q
+    assert "no translation" in q
+    assert "[N]" in q
+
+
+def test_best_question_keeps_rank_order_and_cites_signals():
+    q = build_best_question("best sittings on rain", 5, LANG_ENGLISH)
+    assert 'The user asked: "best sittings on rain"' in q
+    assert "5" in q and "BEST FIRST" in q
+    assert "Mentions" in q and "Plays" in q
+    assert "English" in q and "[N]" in q
+
+
+def test_chitchat_system_prompt_language_and_no_invention():
+    s = build_chitchat_system(LANG_ENGLISH)
+    assert "English" in s
+    assert "Never invent" in s
+    h = build_chitchat_system(LANG_HINDI)
+    assert "Hindi" in h
 
 
 def test_system_prompt_hindi_demands_devanagari_and_no_invention():
@@ -107,3 +155,83 @@ def test_trim_keeps_top_when_top_score_is_zero_or_missing():
 
 def test_trim_single_result_unchanged():
     assert trim_by_relevance([_r(0.8)], 0.2) == [_r(0.8)]
+
+
+# ---- filter_min_score (citation floor) -----------------------------------
+
+def test_floor_keeps_only_passages_above_threshold():
+    results = [_r(0.91), _r(0.80), _r(0.74), _r(0.20)]
+    kept = filter_min_score(results, 0.75)
+    assert [r["score"] for r in kept] == [0.91, 0.80]
+
+
+def test_floor_is_strictly_greater_than():
+    # Exactly 0.75 does not clear a 0.75 floor.
+    kept = filter_min_score([_r(0.75), _r(0.76)], 0.75)
+    assert [r["score"] for r in kept] == [0.76]
+
+
+def test_floor_keeps_top_when_nothing_clears_it():
+    # Weak query / reranker-down (raw RRF) — never go blank, keep the best hit.
+    results = [_r(0.40), _r(0.05), _r(0.01)]
+    assert filter_min_score(results, 0.75) == results[:1]
+
+
+def test_floor_is_a_prefix_so_citation_numbers_align():
+    results = [_r(0.90), _r(0.78), _r(0.10)]
+    assert filter_min_score(results, 0.75) == results[:2]
+
+
+def test_floor_disabled_when_zero():
+    results = [_r(0.40), _r(0.01)]
+    assert filter_min_score(results, 0.0) == results
+
+
+def test_floor_empty_results_unchanged():
+    assert filter_min_score([], 0.75) == []
+
+
+# ---- 1.5: abstention (RAG_ALLOW_ABSTAIN) ---------------------------------
+
+def test_abstain_returns_empty_when_nothing_clears_floor():
+    # allow_abstain=True drops the safety net: a genuine negative (nothing above
+    # the floor) yields [] so the caller returns NO_CONTEXT_MESSAGE, 0 citations.
+    results = [_r(0.02), _r(0.01), _r(0.005)]
+    assert filter_min_score(results, 0.03, allow_abstain=True) == []
+
+
+def test_abstain_still_keeps_passages_above_floor():
+    # Abstention only removes the net; real hits above the floor are still kept.
+    results = [_r(0.91), _r(0.80), _r(0.02)]
+    kept = filter_min_score(results, 0.03, allow_abstain=True)
+    assert [r["score"] for r in kept] == [0.91, 0.80]
+
+
+def test_abstain_false_keeps_single_best_hit():
+    # Default (net on): nothing clears the floor -> keep the single best hit so
+    # "puran singh" and other weak-but-real queries still answer instead of blank.
+    results = [_r(0.02), _r(0.01)]
+    assert filter_min_score(results, 0.03, allow_abstain=False) == results[:1]
+
+
+def test_calibrated_floor_keeps_cross_script_top_hit():
+    # §0.2 calibration point: the lowest legit cross-script top hit (0.040) must
+    # survive the new 0.03 floor (the old 0.75 dropped it entirely).
+    results = [_r(0.040), _r(0.02), _r(0.01)]
+    kept = filter_min_score(results, 0.03, allow_abstain=True)
+    assert [r["score"] for r in kept] == [0.040]
+
+
+def test_list_question_wraps_query_with_numbered_list_instruction():
+    q = build_list_question("10 sitting for rain", 10, LANG_ENGLISH)
+    assert "10 sitting for rain" in q          # original ask preserved
+    assert "numbered list" in q and "10" in q  # explicit enumeration + count
+    assert "METADATA" in q                     # entries grounded in metadata
+    assert "English" in q                      # language directive carried
+
+
+def test_chitchat_reply_bilingual_with_english_fallback():
+    assert chitchat_reply(LANG_HINDI) == CHITCHAT_MESSAGE[LANG_HINDI]
+    assert chitchat_reply(LANG_ENGLISH) == CHITCHAT_MESSAGE[LANG_ENGLISH]
+    # Unknown language falls back to English rather than raising.
+    assert chitchat_reply("klingon") == CHITCHAT_MESSAGE[LANG_ENGLISH]

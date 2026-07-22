@@ -1,6 +1,6 @@
 /**
  * TypeScript mirror of the rag-api JSON contract (rag_api/app.py,
- * rag_api/retrieval.py, rag_api/analytics.py). Keep these in sync with the
+ * rag_api/retrieval.py). Keep these in sync with the
  * backend — they are the only guard against silent contract drift.
  */
 
@@ -89,6 +89,12 @@ export interface QueryBody extends SearchBody {
   /** Optional override; backend validates against the env allowlist. */
   provider?: ChatProvider;
   model?: string;
+  /**
+   * Prior turns of the open thread, oldest first. When present and the query
+   * looks like a follow-up, the backend rewrites it to a standalone query
+   * before retrieval (RAG_ROUTER + RAG_FOLLOWUP_REWRITE). Empty = no rewrite.
+   */
+  history?: { question: string; answer: string }[];
 }
 
 // ---- /api/filters --------------------------------------------------------
@@ -147,8 +153,10 @@ export interface SearchResponse {
   query: string;
   find_quote: boolean;
   scope: string;
-  backend: Backend;
-  retrieval_ms: number;
+  // Optional: present on a live /api/search response, absent on a turn
+  // hydrated from saved history (which doesn't persist engine/timing).
+  backend?: Backend;
+  retrieval_ms?: number;
   count: number;
   results: RetrievalResult[];
   detected_filters: Detection[];
@@ -174,43 +182,22 @@ export interface QueryMeta {
   expanded: boolean;
 }
 
-// ---- /api/analytics/* ----------------------------------------------------
-
-export interface MentionsResponse {
-  term: string;
-  speaker: string | null;
-  chunk_count: number;
-}
-
-export interface SpeakerCount {
-  speaker: string;
-  chunk_count: number;
-}
-
-export interface SpeakersResponse {
-  term: string;
-  speakers: SpeakerCount[];
-}
-
-export interface TranscriptCount {
-  source_file: string;
-  chunk_count: number;
-}
-
-export interface TranscriptsResponse {
-  term: string;
-  transcripts: TranscriptCount[];
-}
-
 // ---- /api/history --------------------------------------------------------
 
-/** Sidebar listing — light payload, no answer/citation bodies. */
+/**
+ * Sidebar listing — one entry per conversation (thread), light payload with no
+ * answer/citation bodies. `id` is the conversation_id; `title` is the first
+ * turn's; `created_at` is the thread's latest activity (so continuing an old
+ * chat floats it to the top).
+ */
 export interface ConversationSummary {
   id: string;
   title: string;
   created_at: string;   // ISO timestamp
   mode: "answer" | "search";
   scope: string;
+  /** Number of Q&A turns in the thread. */
+  turn_count: number;
 }
 
 export interface ConversationListResponse {
@@ -218,10 +205,18 @@ export interface ConversationListResponse {
   count: number;
 }
 
-/** Full record returned by GET /api/history/{id} and POST /api/history. */
-export interface ConversationRecord extends ConversationSummary {
+/** One persisted Q&A turn — what POST /api/history returns, and the elements
+ * of a conversation's `turns`. `conversation_id` groups turns into a thread. */
+export interface ConversationTurn {
+  id: string;
+  conversation_id: string;
+  turn_index: number;
+  title: string;
+  created_at: string;
   question: string;
   answer: string;
+  mode: "answer" | "search";
+  scope: string;
   answer_language: string | null;
   find_quote: boolean;
   expanded: boolean;
@@ -230,6 +225,17 @@ export interface ConversationRecord extends ConversationSummary {
   applied_filters: Record<string, unknown>;
   detected_filters: Detection[];
   citations: RetrievalResult[];
+}
+
+/** Full conversation returned by GET /api/history/{id} — all turns, oldest
+ * first, under one thread. */
+export interface ConversationRecord {
+  id: string;
+  title: string;
+  created_at: string;
+  mode: "answer" | "search";
+  scope: string;
+  turns: ConversationTurn[];
 }
 
 /** Body for POST /api/history. */
@@ -246,4 +252,6 @@ export interface HistorySaveBody {
   applied_filters: Record<string, unknown>;
   detected_filters: Detection[];
   citations: RetrievalResult[];
+  /** Append to this thread; omit/null to start a new conversation. */
+  conversation_id?: string | null;
 }

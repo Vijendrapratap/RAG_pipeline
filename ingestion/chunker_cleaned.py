@@ -127,6 +127,17 @@ MIN_CLEANED_WORD_RATIO = 0.85
 # corpus is 0.079, while every degenerate track sits below 0.10.
 DEGENERATE_RAW_DISTINCT_RATIO = 0.10
 
+# The guard above is one-sided, and the cleaner fails in *both* directions. On
+# 453 of 7,040 raw/cleaned pairs the cleaned text is *longer* than the raw ASR,
+# up to 3.913x — it fabricated content rather than dropping it (4,010 injected
+# Latin glosses like "(Third Eye)"; amplified repetition loops). Measured over
+# those pairs (raw >= 50 words): p75=1.000, p90=1.010, p95=1.088. Legitimate
+# cleaning essentially never adds words, so 1.15 is symmetric with the 0.85
+# floor and fires on 268 files (3.8%). Accepting fabricated text costs content
+# that no query should ever retrieve; falling back to raw only costs spelling
+# normalization. Prefer raw, same trade as the low side.
+MAX_CLEANED_WORD_RATIO = 1.15
+
 # Below this the ratio is dominated by rounding — a 12-word invocation losing
 # two filler words is not a summarization event.
 MIN_RAW_WORDS_FOR_RATIO_CHECK = 50
@@ -137,13 +148,25 @@ def _is_degenerate(words: list[str]) -> bool:
     return bool(words) and len(set(words)) / len(words) < DEGENERATE_RAW_DISTINCT_RATIO
 
 
-def _cleaned_is_lossy(cleaned: str, raw_text: str, name: str) -> bool:
-    """True when the cleanup LLM dropped content instead of normalizing it.
-    Logs the reason with the file name — never silently rejects."""
+def _cleaned_is_unusable(cleaned: str, raw_text: str, name: str) -> bool:
+    """True when the cleanup LLM dropped or invented content instead of
+    normalizing it. Logs the reason with the file name — never silently rejects.
+
+    The expansion check runs *before* the degenerate-raw exemption on purpose:
+    when raw is a repetition loop and cleaned is several times longer, the
+    cleaner amplified the loop rather than condensing it, and raw is the honest
+    text. Downstream `chunker_json._emit_guarded` then drops it as an ASR loop,
+    which is the right outcome for a track with no retrievable speech.
+    """
     raw_words = raw_text.split()
     if len(raw_words) < MIN_RAW_WORDS_FOR_RATIO_CHECK:
         return False
     ratio = len(cleaned.split()) / len(raw_words)
+    if ratio > MAX_CLEANED_WORD_RATIO:
+        log.warning("%s: cleaned text is %.0f%% of raw (%d -> %d words) - LLM "
+                    "invented content instead of cleaning; falling back to raw text",
+                    name, ratio * 100, len(raw_words), len(cleaned.split()))
+        return True
     if ratio >= MIN_CLEANED_WORD_RATIO:
         return False
     if _is_degenerate(raw_words):
@@ -185,7 +208,7 @@ def load_cleaned_text(raw_path: Path, raw_text: str | None = None) -> str | None
 
     if cleaned is None or not cleaned.strip():
         return None
-    if raw_text and _cleaned_is_lossy(cleaned, raw_text, raw_path.name):
+    if raw_text and _cleaned_is_unusable(cleaned, raw_text, raw_path.name):
         return None
     return cleaned
 

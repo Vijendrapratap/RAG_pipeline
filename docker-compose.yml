@@ -12,7 +12,10 @@ services:
     container_name: rag-api
     restart: unless-stopped
     depends_on: [ollama, qdrant, postgres, reranker]
-    ports: ["8080:8080"]
+    # The ONLY service published beyond loopback, and the only one with an auth
+    # gate (DASHBOARD_PASSWORD). Every service below is pinned to 127.0.0.1 —
+    # see the note on ollama for why that matters.
+    ports: ["0.0.0.0:8080:8080"]
     volumes:
       # Tantivy index built by ingestion is read in-process by the API.
       # Read-only because the API is a reader; the ingestion job writes
@@ -88,10 +91,36 @@ services:
       AVAILABLE_OPENROUTER_MODELS: "${AVAILABLE_OPENROUTER_MODELS:-}"
       # --- retrieval tuning ---
       RAG_CANDIDATES: "${RAG_CANDIDATES:-40}"
-      RAG_TOP_K: "${RAG_TOP_K:-8}"
+      RAG_TOP_K: "${RAG_TOP_K:-4}"
+      # Citation floor: only passages reranked above this are cited / shown in
+      # the chat and fed to the answer model. 0 disables it. Calibrated to 0.03
+      # from the §0.2 histogram (0.75 dropped legit cross-script top hits).
+      RAG_CITE_MIN_SCORE: "${RAG_CITE_MIN_SCORE:-0.03}"
+      # Abstain (drop the keep-one-passage net) when nothing clears the floor.
+      # Default off until §3.2 certifies a floor against a negative set.
+      RAG_ALLOW_ABSTAIN: "${RAG_ALLOW_ABSTAIN:-false}"
       RAG_BM25_WEIGHT: "${RAG_BM25_WEIGHT:-0.65}"
       RAG_QUOTE_BM25_WEIGHT: "${RAG_QUOTE_BM25_WEIGHT:-0.85}"
       RAG_SUMMARY_TOP_FILES: "${RAG_SUMMARY_TOP_FILES:-6}"
+      # --- Stage 4: query router + conversational follow-up rewriting ---
+      # On for the linked (multi-turn) chat feature: the router tags follow-ups
+      # and the rewriter turns them into standalone queries using the chat
+      # history the dashboard sends. Fires only on detected follow-ups.
+      RAG_ROUTER: "${RAG_ROUTER:-1}"
+      RAG_FOLLOWUP_REWRITE: "${RAG_FOLLOWUP_REWRITE:-1}"
+      RAG_HYDE_THEMATIC: "${RAG_HYDE_THEMATIC:-0}"
+      RAG_NAME_BM25_WEIGHT: "${RAG_NAME_BM25_WEIGHT:-0.75}"
+      # Agentic planner: list intent ("10 sittings for rain") + bilingual
+      # retrieval variants, one think=false chat call per query. Fail-open.
+      RAG_PLANNER: "${RAG_PLANNER:-0}"
+      RAG_PLANNER_MAX_QUERIES: "${RAG_PLANNER_MAX_QUERIES:-3}"
+      RAG_LIST_TOP_K: "${RAG_LIST_TOP_K:-20}"
+      # Chitchat answered by the chat model (fallback: fixed reply) and the
+      # chunk budget for verbatim-summary turns. 2026-07-15 improvements.
+      RAG_CHITCHAT_LLM: "${RAG_CHITCHAT_LLM:-1}"
+      RAG_VERBATIM_TOP_K: "${RAG_VERBATIM_TOP_K:-10}"
+      # Post-synthesis groundedness judge (drops unsupported answer sentences).
+      RAG_GROUNDEDNESS: "${RAG_GROUNDEDNESS:-0}"
       # --- auth + CORS ---
       DASHBOARD_PASSWORD: "${DASHBOARD_PASSWORD}"
       # Same-origin in this container; widen only if you host the UI elsewhere.
@@ -101,7 +130,16 @@ services:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
-    ports: ["11434:11434"]
+    # Loopback only: ollama's API is unauthenticated and exposes /api/pull and
+    # /api/delete. On 0.0.0.0 it hands anyone on the LAN free generation on this
+    # GPU plus the ability to destroy the model store. Do NOT remove the publish
+    # outright — desktop/main.js probes localhost:11434 (ollamaHasModels) as its
+    # empty-mount detector, and a failed probe makes every launch run
+    # `compose up --force-recreate`.
+    #
+    # Nothing in-cluster needs this mapping: rag-api reaches ollama over the
+    # compose network at http://ollama:11434.
+    ports: ["127.0.0.1:11434:11434"]
     volumes: [./data/ollama:/root/.ollama]
     environment:
       # -1 keeps the chat model resident in VRAM for the whole session so the
@@ -129,7 +167,9 @@ services:
     image: qdrant/qdrant:latest
     container_name: qdrant
     restart: unless-stopped
-    ports: ["6333:6333", "6334:6334"]
+    # Loopback only. The API key is a second line of defence, not the first —
+    # host-side ingestion still reaches this via localhost:6333 (see .env).
+    ports: ["127.0.0.1:6333:6333", "127.0.0.1:6334:6334"]
     volumes: [./data/qdrant:/qdrant/storage]
     environment:
       QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
@@ -139,7 +179,8 @@ services:
     image: michaelf34/infinity:latest
     container_name: reranker
     restart: unless-stopped
-    ports: ["7997:7997"]
+    # Loopback only: infinity has no auth of any kind.
+    ports: ["127.0.0.1:7997:7997"]
     command: >
       v2
       --model-id BAAI/bge-reranker-v2-m3
@@ -161,4 +202,5 @@ services:
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
       POSTGRES_DB: openwebui
     volumes: [./data/postgres:/var/lib/postgresql/data]
-    ports: ["5432:5432"]
+    # Loopback only. Host-side analytics/ingestion reach this via localhost:5432.
+    ports: ["127.0.0.1:5432:5432"]

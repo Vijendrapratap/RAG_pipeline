@@ -1235,7 +1235,9 @@ already present.
   — if it could, a recording would drift into the ring where camps live and the
   picture would start lying.
 - Frame budget under 16 ms at ≥ 1,900 visible nodes, measured via
-  `window.__brainPerf`, not eyeballed.
+  `window.__brainPerf`, not eyeballed. *(Restated by slice 1c: with progressive
+  disclosure the map no longer draws 1,900 nodes unless you open the archive's
+  largest group. See that slice's budgets.)*
 - `frontend/package.json` `dependencies` contains **exactly** `react`,
   `react-dom`.
 - `styles.css` contains a `prefers-reduced-motion` block, and honouring it stops
@@ -1300,7 +1302,7 @@ recording play its isolated vocals beside its transcript.
   **9,335** keys, and a second that resolves every one of their `audio_file`s.
   No sampling.
 - `npm run check:viz` → 12 invariant checks, including *"relaxation never moves a
-  node radially"* and *"relax.ts exports no `drift`"*.
+  node radially"* and *"relax.ts exports no `drift`"*. *(36 after slice 1c.)*
 - `dependencies` is still exactly `react, react-dom`.
 
 **Not verifiable without a browser, and therefore not claimed:** the isolated
@@ -1310,6 +1312,152 @@ Chromium, so the desktop app is safe; a Firefox tab may show a dead player. The
 panel says so rather than failing silently.
 
 **Commit:** `feat: drill-in navigation, a still map, and the recording itself (Phase 16, slice 1b)`
+
+---
+
+### Phase 16 — slice 1c: a map you can navigate, arrange, and read
+
+Still read-only. Still `react` + `react-dom`. Still zero backend changes —
+`build_nodes(rows, prefix, 1)` already returns exactly one level of children.
+
+**Objective.** Make the map do what the design promised. Slices 1 and 1b drew
+**every node ever fetched, forever**: `nodes` was accumulate-only and `draw()`
+culled by viewport frustum alone. `expanded` was never a visibility set — it was
+a "children were fetched" ledger whose only visual consumer was a 1.2 px ring.
+There was no collapse. Alongside that: give the reader control of node spacing
+and of the reading panel's size, and stop the archive totals from vanishing the
+moment anything is clicked.
+
+**Locked decisions**
+
+| Decision | Why |
+|---|---|
+| Visibility is `visibleNodes(nodes, spineOf(focusPath))` | `open` is **derived, never stored**. `focusNode`, `focusUp`, `Esc` and the breadcrumbs already maintain `focusPath`. Two things fall out free: `Esc` *is* collapse, and `selectedPath` can never point at an undrawn node. |
+| One branch open at a time | The spine. Lifting it later is one line — make `open` real state, seed it from `spineOf`. Nothing downstream cares. |
+| `REVEAL_DEPTH = 1`, `PREFETCH_DEPTH = 2` | First paint is the collections, and nothing else — **one click, one level**, all the way down. At `REVEAL_DEPTH = 2` every group was already on the disc (a solid outer smear of thousands of dots) and clicking a collection was a *visual no-op*, because its children were on screen and its grandchildren needed the **group** opened. The prefetch stays one level ahead of the reveal so that first click does not wait on the network. ~430 KB → ~40 KB, ~1,950 nodes drawn → ~17. |
+| `leafCount()` → `weight()` | **Wedge conservation.** A collapsed folder must claim arc for what it *holds*, or a collapsed 1,748-sitting camp claims the wedge of an empty folder and opening it re-angles the whole disc. Since `build_nodes` rolls each track into every ancestor, `weight(collapsed n) == weight(expanded n)`, so expanding moves no angle outside its own subtree. |
+| Node movement is free `(x, y)`; the **layout** is not | The law is not "radius is depth" — it is **the system never moves a node radially, only the reader does**. `angle` and `dist` are what the layout chose, and no drag touches them; the reader's displacement lives in `ox`/`oy` and is added at render time (`applyDisplacements`). This is not a second layout engine: a drag is a rigid translation of a subtree, applied *after* the layout has run. It is also *cheaper* than the angular drag it replaces — **0.056 ms** per pointermove at 2,942 drawn nodes, against 0.132 ms, because a translation is two adds per node where a rotation was two trig calls. |
+| Relaxation buckets by `(depth, frame)`, and `Placed.fixed` is **deleted** | A rigid translation is an isometry, so every chord *inside* a translated subtree is unchanged — relaxation's chord math (`θ = 2·asin(s / 2R)`) is therefore still exact between two nodes sharing a displacement, and meaningless between two that do not. `frame` is the path of the nearest displaced ancestor-or-self. **Theorem:** a dragged node `D` has `frame(D) = D.path`, and any other node with that frame is a strict descendant, hence deeper — so bucket `(depth(D), D.path) = {D}`, and `relaxAngles` skips buckets of size < 2. Relaxation *cannot* move a node the reader placed; no flag is needed. Measured on three simultaneous drags including a nested one: `1｜C0=1 · 2｜C0/G0=1 · 3｜C0/G0=978 · 2｜C0=11 · 1｜C1=1 · 1｜=15`. The `978` is the payoff — a branch you drag out and then open is as tidy as one you left alone. Bonus: dragging a node out no longer disturbs its old ring-mates, since relaxation only pushes apart and never pulls. |
+| A drag clamps to `±MAX_DRAG_COORD = 50,000` | Derived, not chosen. `SpatialGrid.key()` packs a cell index (cell = 48) into `(c + 32768) * 65536`, so a coordinate must stay inside ±1,572,864 or two distant nodes silently share a bucket and hover picks the wrong one. The widest layout this archive can produce — all 55,821 nodes at Spread 420 — reaches 139,566, so 50,000 leaves an order of magnitude of headroom and cannot be reached by hand (at `MIN_SCALE` it is 3,000 px of dragging). It exists mostly to survive a `localStorage` entry that says `1e300`. An infinity clamps to the bound it is heading for; only `NaN` means the origin. |
+| Targets are stored **absolute**; `brain.arrange` is bumped to **v2** | A stored delta drifts as the layout changes underneath it; an absolute point is what the reader chose, so a moved node holds its pixel while the Spread slider grows the disc around it. `applyDisplacements` re-derives every `frame` from the ledger on each relayout *and on each pointerup*, which makes the state after a drag identical to the state after a reload. v1 held bare angles; reading one as a point would scatter the map, so the key changes with the shape and the old one is removed on sight. |
+| Drag a dot → the dot moves; drag the background → the map pans | No modifier, no mode. A Shift gesture hidden behind a collapsed panel is a feature nobody has; the "Rearrange" toggle is deleted. A press below `DRAG_SLOP_PX = 3` screen pixels is still the click it started as, so a dot is both a button and a handle. Shift now forces a pan, for a press that lands on a dot by accident. |
+| Relaxation separates by **chord**, `2·asin(s / 2R)` | `θ = s / R` is its small-angle approximation and it under-separates. At `minRingGap = 60` with 22-unit dots it leaves a **0.98-unit overlap** — and the old invariant check's `- 0.5` tolerance had been silently absorbing exactly this error at the shipped radius. The tolerance is now `1e-6`. |
+| `minRingGap` floored at `2 · MAX_NODE_RADIUS = 44`, inside `radialTree` | Floors clamp in the layout, not at the call site, so the checker proves them against every caller — including a slider dragged to zero. It also makes "adjacent rings never touch" true by construction, which nothing checked before. |
+| Ring radii solve `Σ 2·asin((ρ + pad/2) / R) ≤ 2π` | The arc form `2πR ≥ Σ(2ρ + pad)` over-promises. `asin` is convex, so the per-node budget bounds every *pair*, which is exactly what relaxation must reach. Reduces to the arc form for large rings; the correction only bites where the old formula broke. |
+| Camera compensation is a **pan**, not a rescale | `v ↦ k·v, scale ↦ scale/k` reproduces the whole screen image — making the Spread slider a no-op with extra steps. `anchorPan` keeps *one node* under its pixel and lets the rest move, which is what the reader asked for. |
+| The panel resize writes to the DOM, never to state | `.brain-side` renders one `<li>` per transcript segment. A `setState` per pointermove reconciles thousands of them. State commits once, on release. |
+
+**Bugs fixed, found while doing this**
+
+- **`hoverRef` was never re-resolved after a relayout.** `draw.ts` compares
+  `Placed` by object identity and `radialTree` reallocates every one, so `keep`
+  held a single ghost, `dimmed()` was true for every real node, and the whole map
+  dropped to 10% opacity until the next mousemove. Only the 10 s poll triggered
+  it. Collapse would have fired it on **every click**.
+- **`selectedPath` was in the layout effect's dep array.** Clicking a *recording*
+  ran `radialTree` + 24 relaxation passes + a full `SpatialGrid.rebuild` to update
+  one `.find()`.
+- **`npm run bench:viz` threw.** It imported and called `drift`, deleted in
+  `0eba68a`, while `check:viz` asserts `drift` is gone. The two scripts
+  contradicted each other and any number resting on the bench was unverified.
+- **`expanded` never shrank**, so the poll fanned out one request per folder ever
+  opened. The refetch is now the spine: at most one path per level.
+- Four `Math.max(64, ...placed.map(...))` argument spreads, which throw
+  `RangeError` past ~65k nodes. One pass now yields `byPath`, `extent`, and the
+  bounding box.
+- The invariant fixture hand-wrote `n_files: 5` on a folder whose only child had
+  `n_files: 1` — a shape `build_nodes` cannot produce. It is now generated from a
+  track list, rolled up the way the backend rolls up.
+- **`relaxAngles` sorted each ring on the raw angle.** `place()` hands out angles
+  in `[-π/2, 3π/2]`, so that *happened* to be the circular order — until a
+  relaxation pass shoved one across the seam. Then two true neighbours sit at
+  opposite ends of the array, nothing pushes them apart, and dots overlap. It
+  sorts the wrapped angle now; the regression test measures a **4.02-unit
+  overlap** without it.
+- **`frameFor` clipped at `MIN_SCALE = 0.06`**, so the "Whole archive" breadcrumb
+  could not actually frame the whole archive: anything past an extent of ~6,600
+  was silently cropped, and opening the largest camp at Spread 420 reaches 14,575.
+  Free `(x, y)` dragging makes it reachable by hand, which is how it was found.
+  `MIN_SCALE` is now `0.006`, which frames an extent of 92,000 — enough to cover
+  `MAX_DRAG_COORD`. That in turn forced the hover slop to be capped: it is measured
+  in *layout* units, so at 0.006 an uncapped `5 / scale` swept 1,521 grid cells on
+  every pointermove. `Math.min(5 / scale, 4 · MAX_NODE_RADIUS)` sweeps 49.
+- **`applyDisplacements` skipped `applyAngles` on an empty ledger**, so clearing
+  the arrangement left every node rendered at its last dragged position until
+  something else forced a relayout. Caught by the invariant checker, not by hand.
+
+**Deliverables**
+
+- `frontend/src/viz/camera.ts` — `Viewport`, `toScreen`, `toLayout`, `anchorPan`.
+  Split out of `draw.ts`, which touches `document` and so cannot be loaded by the
+  checker. Added to both npm scripts.
+- `frontend/src/corpus.ts` — `PREFETCH_DEPTH`, `REVEAL_DEPTH`, `MAX_NODE_RADIUS`,
+  `spineOf`, `visibleNodes`, `childrenUnfetched` (was `hasHiddenChildren`).
+- `frontend/src/viz/radialTree.ts` — `weight()`, `a0`/`a1`/`ox`/`oy`/`frame` on
+  `Placed`, `subtreeOf`, `translateSubtree`, `applyDisplacements`, `clampTarget`,
+  `MAX_DRAG_COORD`, clamped `LayoutOptions`, chord-exact `seatRadius`.
+- `frontend/src/viz/relax.ts` — `asin` separation, `(depth, frame)`-keyed ring
+  buckets, always-symmetric correction. **No new exports** (`check:viz` asserts
+  `Object.keys(relax) === ["relaxAngles"]`).
+- `frontend/src/components/ArchiveHome.tsx` — the totals, collapsible, pinned to
+  the top of the panel. `CorpusDetail` is now `memo`'d and returns `null` for a
+  null node.
+- `BrainView.tsx` — pointer-event migration with capture, free `(x, y)` drag on a
+  bare press, two spacing sliders, the `role="separator"` splitter, and three
+  `localStorage` preferences (`brain.spacing.v1`, `brain.arrange.v2`,
+  `brain.side.v1`), each clamped on read inside a `try`/`catch`.
+- `frontend/src/viz/draw.ts` — collections are labelled unconditionally. An
+  unlabelled disc of dots is a picture of an archive, not a way into one.
+- `frontend/scripts/{check-viz-invariants,bench-viz}.cjs`.
+
+**Acceptance criteria** — all run and shown
+
+- `npm run check:viz` → **36** invariant checks, including *wedge conservation*
+  (expanding a node changes no angle outside its subtree, to 1e-9), *chord-exact
+  non-overlap to 1e-6 across the whole slider sweep* (`minRingGap ∈ {60,130,420} ×
+  padding ∈ {0,2.5,24}`), *adjacent rings never touch*, *the layout stays inside
+  `SpatialGrid`'s key space at 27,806 nodes — and still does with four branches
+  flung to `±MAX_DRAG_COORD`*, *a drag never changes `dist` or `angle`*, *a rigid
+  translation preserves every chord inside the subtree*, *a node the reader placed
+  is alone in its `(depth, frame)` bucket and 200 relaxation passes cannot move
+  it*, *a moved node survives a relayout at every spacing*, *`clampTarget` bounds a
+  hostile `localStorage` value*, *relaxation still separates a ring whose subtree
+  was pushed off the seam*, and *the camera compensation is exact*.
+- `npm run bench:viz` **runs** (it threw before) and reports, at 27,806 sittings
+  with the largest group open (2,942 drawn nodes): expand path **< 100 ms**
+  (measured 11.0 ms), node-drag pointermove **< 16 ms** (measured 0.056 ms — it was
+  0.132 ms while the drag was angular), hover pick × 1000 < 16 ms. An idle frame
+  does zero work.
+- `npm run build` clean. `dependencies` is still exactly `react, react-dom`.
+- `pytest tests/unit -q` → **430 passed**; `ruff check rag_api/` clean. The
+  backend is untouched.
+- First paint draws only the collections: `window.__brainPerf.visibleNodes` ≈ 17,
+  and one `state?prefix=&depth=2` of ~40 KB in the network panel.
+- Drilling `Dagshai 2002/` → `03 MAR - 2002/` → `DAGSHAI 26 - 29 MAR 2002 HOLI
+  CAMP/` → `26 MAR - 1$ - 7 PM/` → `02 OM GURUVE NAMAH.json` still reaches the
+  transcript and audio, **one level revealed per click**. `Esc` closes one level
+  and **no node outside that branch moves**.
+- Hovering a dot immediately after clicking one does not darken the map.
+- Sweeping Spread 60→420 and Breathing room 0→24: no overlap at any setting, and
+  the node at the centre of the screen stays under the same pixel.
+- Drag a sitting from the outer ring into the middle of the disc: its 978 tracks
+  follow rigidly, nothing outside its subtree moves, and `dist` and `angle` are
+  unchanged. Open it and its tracks appear around it, relaxed and non-overlapping.
+  Reload — it holds. Sweep Spread 60→420 and it holds its point while the disc
+  grows around it. Reset restores everything. A click that jitters under 3 px
+  still opens the node.
+- Drag the splitter 280↔640 px: the transcript reflows, the canvas re-centres,
+  and no `setState` fires per pointermove. Focus it and the arrow keys resize it.
+  The value persists, clamped on read. Below 1000 px it becomes a row splitter.
+- `docker stop rag-api` for 8 s: the map holds its last picture, shows the
+  reconnecting badge, recovers. It does not flash empty.
+
+**Not verifiable without a browser, and therefore not claimed:** the splitter's
+`aria-valuenow`/`aria-orientation` announcements, and pinch-zoom on touch —
+`touch-action: none` still suppresses native gestures and nothing yet replaces
+them. The pointer migration is the prerequisite; the gesture is separate work.
+
+**Commit:** `feat: progressive disclosure, spacing controls, and a resizable panel (Phase 16, slice 1c)`
 
 **Later slices, gated and not opened here:** filesystem overlay (the real five
 states, via the desktop app — the only process that can see `D:\Audio Data`);
@@ -1323,6 +1471,324 @@ re-keys the whole archive and duplicates the index rather than growing it.
 takes a narrower folder as `$1`. The performer web stays **blocked on
 measurement** — `catalog_track.matched_source_file` is populated for 0 of 22,501
 rows, so those edges would connect nothing to nothing.
+
+---
+
+### Phase 17 — Deterministic Hindi text normalization and entity repair
+
+**Objective:** Repair the transcript corpus *before* it is chunked. The
+`.cleaned.txt` files produced upstream by the Qwen 3.5 cleaner (in
+`D:\Transcription whisperx\Output`) carry four classes of damage that make
+retrieval fail, and the chunker faithfully indexes all of it. This phase adds a
+pure-Python normalization pass, a corpus-mined entity gazetteer, and fixes the six
+chunker/metadata defects that survived adversarial verification. **No LLM, no GPU,
+no network.** Two further findings were raised and then **refuted by measurement**
+(below); they are recorded so they are not re-raised.
+
+The dominant defect: **31% of files spell the same concept in both scripts**
+(`mind`/`माइंड` 25% of files, `meditation`/`मेडिटेशन` 18%). Some tokens are corrupted
+*mid-word* — `मEDITATION` (566×), `रishi` (197×), `Kumarों` (16×) — and are
+unretrievable by any query in either script. BM25 cannot bridge an orthography
+split, and the reranker cannot recover a candidate lexical search never surfaced.
+
+**Locked design decisions:**
+
+| Decision | Choice |
+|---|---|
+| Method | Deterministic only. Rule tables + a corpus-mined gazetteer. An LLM re-clean (Route B) is **explicitly out of scope** — the upstream cleaner already fabricated 4,010 glosses, amplified a 552-word file to 2,160, produced `ठंडाई` (a cold drink) where context wanted `तन्हाई` (solitude), and left `वारेपूर्ण सिंग` unrepaired after glossing it. |
+| Output | `<stem>.normalized.txt` written **alongside** the source. `.cleaned.txt` is never mutated. Revert = delete one glob. Every file stays diffable. |
+| Entity truth | The corpus is its own gazetteer. `पूरन सिंह` occurs 42× in 14 files; `पूर्ण सिंग` 3×; `वारेपूर्ण` 1×. Majority vote over phonetic clusters recovers the canonical form with no model. |
+| Entity safety | **Human sign-off is a hard gate.** Mining stops and emits `data/gazetteer_review.md`; `data/gazetteer.json` is generated from the approved file only. No name is rewritten on inference. |
+| Rewrite safety | Word-boundary anchored, minimum two tokens. `सिंग` has 527 hits but `डांसिंग` (*dancing*) contains it — a naive replace yields `डांसिंह`. `पूर्ण` alone legitimately means "complete"; only the bigram `पूर्ण सिंग` is wrong. |
+| Cross-script bridging | **A synonym table, never a source rewrite.** Registered in the Tantivy analyzer at index *and* query time, so it is additive (recall-only) and cannot corrupt text. Rewriting `mind`→`माइंड` would corrupt the verbatim English Guruji actually speaks — 43.9% of `watch` and 47.5% of `seer` sit inside English sentences. Rewrites are reserved for surface forms with **no valid reading** (`मEDITATION`, `रishi`, a glued danda). |
+| Loop collapse | **Enabled**, at `N ≥ 6` consecutive identical tokens → `K = 3`. Hand-checked on 196 runs: 0 lost retrievable meaning. `N < 6` or `K < 3` is forbidden — length-2 runs number 71,240 and are legitimate reduplication (`बहुत बहुत`). Phrase loops are a known, documented gap handled by the chunker's distinct-ratio guard. |
+| Honorifics | `Swami ji` / `Gurudev` / `Sadguru` / `Guruji` are one person (user-confirmed), but are **never unified in body text** — `हे मेरे गुरुदेव` is a bhajan lyric. Equivalence is recorded in `data/aliases.json` for query expansion only. `Rishi ji` is a distinct speaker and is never aliased to them. |
+| Chunking parameters | **Unchanged.** `TARGET_TOKENS=450`, `MAX_TOKENS=700`, and `estimate_tokens`' `1.3` multiplier all stay. Only its backwards docstring is corrected. Re-tuning the multiplier re-chunks the whole corpus for no correctness gain (nothing is truncated: 700 est ≈ 834 real vs bge-m3's 8192) and is a PRD §3-class decision. |
+| `track_type` vocabulary | **Head-anchored match**, not substring — substring reclassifies the song `MEDITATION KI MASTIYON MEIN`. Three values added (user-approved): `qa` (a `QUES`/`QUESTION` prefix, 209 tracks), `session` (the substring `SITTING`, 83), and `combined` (≥ 2 distinct vocab types in one title, 108 — a `SAMBODHAN & PRAVACHAN` is genuinely both, and a single-valued field cannot say so). `track_type` stays single-valued; making it a list would touch the Qdrant payload type, `tag_schema.py`, `analytics.py`, `retrieval.py` and the frontend filter, which is outside this phase. |
+| Re-ingestion | Non-idempotent (Qdrant point IDs hash chunk text; the Tantivy writer is append-only). Rebuild targets a **freshly created** collection and index, never a live one. |
+
+**Rejected after measurement** (recorded so they are not re-raised):
+
+- *WhisperX word confidence as a suspect-span detector.* Every word in `*.raw.json`
+  carries a `score`. Over 44,294 words / 60 files: median `0.200`, 67% below `0.30`,
+  0.8% above `0.80`. Compressed alignment noise, not calibrated probability.
+- *The `latin-1` fallback in `chunker_text.py:52-62`.* Real as written, but
+  **unreachable**: 0/7,413 `.cleaned.txt` and 0/9,335 `.raw.json` fail strict utf-8;
+  0 have a BOM. The live path is `chunker_cleaned.py` (via `scripts/add_transcripts.sh:39`),
+  which reads strict utf-8 and raises → isolates to `_failed/`. Loud, not silent.
+  `chunker_text.read_text` is the legacy plain-`.txt` path; nothing imports it.
+- *Danda desegmentation as a source rewrite* (`(\S)([।॥])` → `\1 \2`, 374,024 occurrences
+  in 6,885 files). The stated rationale — that `mind।` is a single BM25 token — is **false**.
+  Tantivy's `default` tokenizer splits on any non-`is_alphanumeric` character, and `।`
+  (U+0964, category Po) is one. Indexing `मैं आया।दूसरा वाक्य।` and querying `दूसरा`
+  returns the document. The glued danda is a *sentence-splitting* defect, already fixed at
+  `chunker_text.SENTENCE_SPLIT` with a zero-width lookahead, and nothing more. Rewriting
+  374,024 sites across 93% of the corpus to fix a non-problem was rejected.
+- *Em-dash gloss splitting as a source rewrite* (`(\w)—(\w)` → `\1 \2`, ~420 occ). Refuted
+  the same way and for the same reason: U+2014 is category Pd, so `जागरण—enlightened`
+  already indexes as both `जागरण` and `enlightened`. No rewrite needed.
+- *Devanagari matra conflation.* Checked while refuting the above, because it would have
+  outranked every other finding: it does not happen. `आया` does not match `आयी` or `आई`,
+  and `सिंग` does not match inside `डांसिंग`. Tantivy indexes Devanagari words whole. The
+  substring hazard exists only in **our** rewrite rules, never in BM25.
+
+**Deliverables:**
+
+`ingestion/normalize_text.py` — pure functions, no IO, no network (mirrors the
+shape of `ingestion/clean_align.py`, which is verified order-preserving and must
+not be modified). Table-driven from `data/normalize_rules.json`.
+
+**The corpus splits into what may be rewritten and what may only be bridged.** A
+rewrite is safe only where the surface form has *no valid reading*. Cross-script
+canonicalization fails that test: `mind`, `master`, `watch` and `seer` occur inside
+verbatim English quotations that Guruji actually spoke — 9.7%, 18.4%, **43.9%** and
+**47.5%** of their Latin occurrences respectively (*"you are not a mind, you are a seer
+of it"*). Rewriting those to Devanagari would corrupt real speech to fix a BM25 problem.
+
+*Rewritten in `.normalized.txt` (each surface form is invalid Devanagari, so there is
+nothing to corrupt). Every rule below was confirmed against the **real Tantivy `default`
+tokenizer**, not assumed:*
+
+1. **Intra-word script-mix, loanword class** — exact **whole-token** map.
+   `मEDITATION` 1,498 occ / 417 files → `मेडिटेशन`; `सittings` 80 → `सिटिंग्स`;
+   `थॉUGHT` 19, `मEDITेशन` 31, `मeditation` 13. Never a substring replace.
+   *Verified:* a document containing `मEDITATION` matches **neither** `मेडिटेशन` **nor**
+   `meditation` — Devanagari and Latin letters are both `is_alphanumeric`, so the corrupt
+   form is one indivisible token, unreachable from either script. This is the defect.
+2. **Intra-word script-mix, native class** — a *separate* exact map, because the target is
+   a Sanskrit/Hindi word, not a loanword. `रishi` 578 occ / 251 files, `Kumarों` 18/11,
+   `सद्गuru` 4/2, `रindo` 23/17, `निभaya` 35/22. **The target spelling requires human
+   sign-off:** the corpus contains **zero** standard `ऋषि` and is internally split
+   `रिशी` 342 / `रिशि` 207. Corpus-dominant ≠ orthographically standard.
+3. **Devanagari-internal spelling scatter** — `{मीडिटेशन, मैडिटेशन, मेंडिटेशन, मेडिटीशन,
+   मिडिटेशन, मेडिटिशन}` → `मेडिटेशन` (~11,000 occ / 3,081 files). Devanagari→Devanagari,
+   so no English-quotation hazard at all. *Verified:* `मीडिटेशन` matches only itself.
+   Highest value per unit of risk in the phase.
+4. **Subscribe excision** — `सब्सक्राइब` 5,217 occ / 1,678 files and `सबस्क्राइब` 25/9.
+   **Token excision, never line deletion:** 159 segments glue the artifact to genuine
+   meditation vocabulary. The match may not cross `और` or any unlisted word.
+5. **Loop collapse** — a single punctuation-normalized token repeated **N ≥ 6** times
+   consecutively collapses to **K = 3**. Measured: 2,715 runs in 1,530 files (20.6%),
+   run lengths 6–13,678, removing ~142,872 loop tokens. **Ships enabled**: a hand-check
+   of 196 runs found 0 that lost retrievable meaning at K=3. `N` may never drop below 6
+   nor `K` below 3 — lengths 2–5 are legitimate reduplication (71,240 length-2 runs,
+   3,648 length-3: `बहुत बहुत बहुत`, `ॐ ॐ ॐ`, `नमो नमो नमो`).
+
+Because a glued danda survives into the token map's input (`मEDITATION।`), the exact-token
+matcher strips leading/trailing punctuation before comparing, and restores it after. It
+does **not** rewrite the punctuation — see the two rejected rules below.
+
+*Bridged by a synonym table, never rewritten:*
+
+8. **Cross-script concept bridging** — `data/synonyms.json`, a flat `{surface forms} →
+   canonical` table registered in the **Tantivy analyzer at index time and query time**.
+   Additive: it expands recall and cannot corrupt display text. Canonical direction is
+   chosen per concept by frequency *and stability*, not by a blanket script preference:
+   `मेडिटेशन` wins for meditation (1.31×), but `awareness` and `spiritual` keep their
+   **Latin** canonical because the Devanagari side is 10+ unstable phonetic spellings with
+   no dominant form. Dense retrieval already partly bridges this arm; BM25 does not.
+9. **Gloss capture** — the 4,010 injected Latin parentheticals across 305 files
+   (`(Master)` 98×, `(Antarmukhi)` 73×, `(Third Eye)` 51×) are stripped from indexed text
+   and captured to `data/aliases.json` for query expansion.
+
+**Anti-rules — measured, and deliberately NOT written.** Each looks like an obvious
+cleanup and would destroy real content. They ship as *tests*, not as rules:
+
+| Surface form | Occ / files | Why it must survive |
+|---|---|---|
+| `देखते रहना` | 7,928 / 1,413 | Not a "keep watching" outro. It is *the* core meditation instruction. |
+| `घंटी` / `घंटा` / `घंटे` | 2,749 / 1,186 | Means "hour(s)" (`चौबीस घंटे`), not the YouTube bell. |
+| `लाइक` | 557 legitimate | Means "-worthy" (`जीने लाइक`, `चाइल्ड लाइक`). No `लाइक करें` exists. |
+| `धन्यवाद` / `शुक्रिया` / `नमस्कार` | 1,469 / 800 | Genuine thanks and greeting. `देखने के लिए धन्यवाद` = **0**. |
+| `चैनल` | 65 / 39 | Real TV channels (`आस्था चैनल`) the program aired on. |
+| `वीडियो` / `शेयर` / `कमेंट` | 161 / 149 | Cassette catalog; sharing sorrow; scriptural commentary. |
+| bare `आई` | 6,252 | The verb *"came"* (`समझ आई`). Only the bigram `थर्ड आई` means "eye". |
+| `ऊर्जा` | 1,412 / 681 | Native Sanskrit "energy", used *alongside* `एनर्जी` as a deliberate gloss pair. Never fold. |
+| `झाल`, `ओम् ओम् ओम्` | length ≤ 5 runs | Cymbal onomatopoeia and chant. Only runs ≥ 6 are artifacts. |
+
+Substring matching is banned throughout: `डांसिंग` contains `सिंग`, `पोटेंशियल` contains
+`टेंशन`, `डिपॉजिट` contains `पॉजिट`, `सिंसियर` contains `सियर`, `डिस्लाइक` contains `लाइक`.
+Every rule is exact-whole-token or explicitly word-boundary-anchored.
+
+**Known coverage gap (documented, not fixed):** phrase-level loops. `ब्लूम लाइक ब्लूम लाइक
+…` repeats a *bigram*, so no token is adjacent to itself and the N≥6 single-token rule
+cannot see it — it accounts for 4,496 of the 5,089 raw `लाइक` hits in one file. 259 files
+have a phrase loop that the collapse rule misses; `chunker_json`'s existing distinct-ratio
+guard (`LOOP_UNIQ_RATIO=0.15`) catches them at chunk level. The two filters are
+complementary. Do **not** lower `N` to chase phrase loops: it will not catch them and adds
+false-positive risk.
+
+`ingestion/gazetteer.py` — mine surface forms → cluster by phonetic key
+(Devanagari→ISO transliteration, so `सिंग`≈`सिंह`, `पूर्ण`≈`पूरन`) → majority-vote →
+emit `data/gazetteer_review.md` and **stop**. A second invocation compiles the
+approved file into `data/gazetteer.json`.
+
+`ingestion/chunker_cleaned.py` — `_cleaned_is_lossy` (line 140) gains an **upper**
+bound, `MAX_CLEANED_WORD_RATIO = 1.15`, symmetric with the existing `0.85` low side.
+Today only the low side is guarded (`ratio >= 0.85 → False`), so 453 files that
+*expand* pass silently. Threshold chosen from the measured distribution over 7,040
+raw/cleaned pairs (raw ≥ 50 words): p75 = 1.000, p90 = 1.010, **p95 = 1.088**, then a
+long tail to 3.913×. At 1.15 the guard fires on 268 files (3.8%). On a high ratio it
+falls back to raw, exactly as the low side does — accepting hallucinated expansion
+costs *fabricated* content that pollutes retrieval, which is strictly worse than the
+spelling normalization lost by preferring raw. The worst expanders are chant-heavy
+tracks (`02 MEDITATION` 552→2,160; `OM GURUVE NAMAH` ×3; `02 MEDITATION (WITHOUT OM)`
+4,608→16,961), where raw is itself a repetition loop and `chunker_json` will drop it —
+the correct outcome for a track with no retrievable speech.
+
+`ingestion/chunker_json.py` — `_emit_guarded` (line 194) leaks a chunk whose whole
+content is one repeated token: a lone `ओ` spanning 16 s survives because `wc=1` is
+below the `MIN_LOOP_WORDS = 50` floor. That floor is **deliberate** (line 34-35: it
+"keeps a legitimately short, naturally-repetitive chunk from being flagged") and must
+not be lowered. Add a separate, narrower guard: drop when `len(set(words)) == 1`.
+Measured on disk: **10 of 24,567 chunks (0.041%)**. Three are the meditation syllable
+`ओ`; the other seven are single real Hindi words (`बस`, `हर`, `बेटा`, `आमीन।`, `झाल`,
+`हिष्ठ`, `गिर`), which this guard also drops. That is intended — a one-word chunk
+carrying a full source/timing header is unretrievable noise either way — but it is a
+*drop*, so it must be dead-lettered with a reason, never discarded silently. The guard
+runs **below** the loop guard, so a 5,000-word `राम` loop still classifies as
+`asr_loop` (which `audit_chunks.py` keys on), not `single_token`.
+
+`ingestion/chunker_text.py` — `SENTENCE_SPLIT` (line 37) requires whitespace *after*
+the danda, so `।` glued to the next word never splits (117 in an 800-file sample).
+Fixing this also reduces how often `chunker_json._subdivide_body` raises. Its
+`estimate_tokens` docstring (line 46) claims the `1.3` heuristic is "conservative for
+non-Latin scripts"; measured against the real bge-m3 tokenizer it *undercounts*
+Devanagari (median 1.2×, tail 1.79×). Correct the docstring; leave the constant.
+**Both functions are imported by `catalog/index_catalog.py:37`** — the danda fix
+changes catalog chunking too, and needs a catalog test.
+
+`ingestion/chunker_json.py` — `_subdivide_body` (line 146) raises `ValueError` on a
+single sentence over `MAX_TOKENS`. Confirmed reachable:
+`chunker_cleaned.py:235 → cj.chunk_segments → _emit_guarded → line 207`, and it fires
+on **40 of 9,335 files (0.43%)** — a >700-est-token run with no danda — each of which
+produces zero chunks and is never indexed. Window-split instead of dead-lettering the
+file. (The largest single terminator-free sentence measured is 6,194 est-tokens.)
+
+`ingestion/utils/path_parser.py` (only — see the note on `tag_schema.py` below):
+
+- `track_type_for()` today is an **exact** dict lookup, so `MEDITATION (WITHOUT OM)`
+  (258 tracks) falls to `bhajan`. Replace with a **head-anchored** match — a vocab word
+  at the start of the title, followed by end-of-string, `(`, `-`, or a bare number —
+  plus three carve-outs: a `QUES`/`QUESTION` prefix → `qa`, the substring `SITTING` →
+  `session`, and **two or more distinct vocab types present → `combined`** (user-approved).
+  Substring matching was rejected: it reclassifies the song `MEDITATION KI MASTIYON MEIN`.
+
+  Measured over all 9,335 tracks with the shipped `track_type_for`. `typed` rises
+  4,212 → 5,262 (**+1,050**):
+
+  | type | today | Phase 17 | Δ |
+  |---|---|---|---|
+  | bhajan | 5,123 | 4,073 | −1,050 |
+  | meditation | 1,511 | 1,912 | +401 |
+  | invocation | 1,365 | 1,412 | +47 |
+  | address | 1,025 | 1,189 | +164 |
+  | discourse | 311 | 349 | +38 |
+  | qa | 0 | 209 | +209 |
+  | combined | 0 | 108 | +108 |
+  | session | 0 | 83 | +83 |
+  | music | 0 | 0 | 0 |
+
+  **False-positive gate — passed.** All 200 distinct reclassified titles were enumerated.
+  Zero songs move: `MEDITATION KI MASTIYON MEIN` (13) and `MERI SHAM MEDITATION MEIN`
+  (12) both stay `bhajan`, the first because its tail is a lyric, the second because
+  `MEDITATION` is not at the head.
+
+  `combined` = 108 (`SAMBODHAN & PRAVACHAN` 35, `PRAVACHAN & SAMBODHAN` 33,
+  `MEDITATION & PRAVACHAN` 9). Note this is **not** the 224 titles containing `&`:
+  most of those name a song on one side (`RUHANI GEET & SAMBODHAN`) and carry only one
+  vocab type, so they stay `bhajan`. Only multi-*type* titles become `combined`.
+
+  `ENTRY MUSIC` and `RETURN MUSIC` match **zero** tracks today and zero after. Both
+  vocabulary keys are dead. They are left in place — removing them is not this phase's
+  job — but `music` must not be reported as a live facet.
+
+  ~115 tracks still contain a vocab word and stay `bhajan` (`STANDING MEDITATION` 10,
+  `DHYAN MEIN UTRO & MEDITATION` 8, `PRAVACHAN ON SAMVAAD` 3). Accepted: the rule is
+  deliberately conservative, and no false positive is worth these.
+
+- `PRIMARY_SPEAKER` stays `"Swami ji"` (the default). Diarization is **0/9,335**
+  corpus-wide and all 24,567 chunks read `('Swami ji',)`, doubly caused: `normalize_segments`
+  nulls the speaker when `fmt != 'whisperx'`, and `chunker_cleaned.py:56` hardcodes
+  `FMT="whisper"`. The facet is live (`retrieval.py:64-65` filters the chunk `speakers`
+  array; `/api/analytics/speakers`), so a non-Swami query returns empty. The stamping site is
+  `chunker_json._render_chunk` — when diarization is empty it fell back to the module constant
+  `PRIMARY_SPEAKER`; it now falls back to `path_meta.primary_speaker`. A new
+  `primary_speaker_for(title)` returns `"Rishi ji"` for a title naming **only** him
+  (`SAMBODHAN - RISHI JI` etc., **73 tracks**) and keeps `"Swami ji"` when the title names
+  both (**38 tracks** — he is genuinely present, the field is single-valued). The **209**
+  `QUES` tracks are handled on the `track_type` axis (`qa`), not the speaker axis: a Q&A is
+  still Guruji answering. `chunker_text.py`'s plain-text path was made consistent. The
+  now-accurate comments replace the old "every transcript is Swami ji's voice" claims.
+
+- Hyphenated-location grammar (`06 SEC-9 PANCHKULA 5 - 6 DEC 2015`): **80 tracks**
+  (54 hyphenated-location date-range events + 26 single-date events). Of the 3,365
+  files missing `event_id` under current code, the other **3,285** are Dagshai trees
+  with no event level — correct behavior, not a bug. Low priority.
+
+**`tag_schema.py` is deliberately NOT touched.** `event_type` (the LLM's judgment of
+transcript *content*, `ALLOWED_EVENT_TYPES`) and `track_type` (deterministic, from the
+title) are independent fields on independent axes. Adding `session`/`combined`/`address`/
+`invocation` to the LLM's allowed outputs would change what Phase 13 enrichment asks the
+model to emit and force a re-enrichment — a Phase 13 decision, out of scope here (rule 3).
+The `track_type` controlled vocabulary is self-contained: `path_parser.TRACK_TYPES` is the
+frozenset of the nine values `track_type_for` can return, used for validation.
+
+**Acceptance criteria:**
+
+- `pytest tests/unit/` passes. Each rule family has a positive test **and a
+  false-positive test**: `ओम् ओम् ओम्` survives loop collapse; `डांसिंग` survives the
+  `सिंग` rule; bare `पूर्ण` survives the gazetteer; a legitimate Latin passage survives
+  loanword mapping; `हे मेरे गुरुदेव` survives honorific handling unchanged.
+- Corpus before/after counts printed. These are the **actual dry-run results** of
+  `normalize()` over all 7,413 `.cleaned.txt` (47% of files change):
+
+  | Metric | before | after | note |
+  |---|---|---|---|
+  | `सब्सक्राइब` + `सबस्क्राइब` | 5,244 | **0** | token-excised, no line deleted |
+  | single-token runs ≥ 6 | 2,483 | **0** | collapsed to K=3 |
+  | `मEDITATION` (whole token) | 1,498 | **0** | exact-token map |
+  | mixed-script token occ (all) | 3,234 | **758** | residual is flagged/rare — below |
+  | injected Latin glosses | — | **4,061** captured | to `data/aliases.json` |
+
+  The 758 residual mixed-script occurrences are **not** silent failures: they are the
+  16 flagged personal-name/unverifiable-target forms (`data/normalize_review.md`) plus a
+  539-type tail of ≤ 4-occurrence variants, two of which are morphological (`मEDITATIONों`,
+  `इमEDITATION`, 1 occ each) that a whole-token map cannot reach without a bespoke rule
+  per inflection. Every one is enumerated in `normalize_review.md`; none is guessed at.
+  These supersede the first-pass figures (`मEDITATION` 566, `रishi` 197), which
+  under-counted by excluding punctuation-adjacent forms.
+- **Anti-rule tests are mandatory and are acceptance criteria, not nice-to-haves.** After
+  normalization, `देखते रहना` still occurs 7,928× in 1,413 files; `घंटे` 2,128×; legitimate
+  `लाइक` 557×; `चैनल` 65×; `धन्यवाद` 1,159×; `ऊर्जा` 1,412× and is never `एनर्जी`. `ओम् ओम्
+  ओम्` (a length-3 run) is unchanged. Bare `आई` is never mapped to `eye`.
+- Cross-script bridging is verified as **recall-only**: `.normalized.txt` contains the same
+  count of Latin `mind` / `watch` / `seer` / `master` tokens as `.cleaned.txt`. A diff that
+  shows any of these rewritten is a **failed** phase.
+- `वारेपूर्ण सिंग` → `वाह रे पूरन सिंह` in
+  `Live Masters 2010_isolation/16 HOTEL KEYS LUDHIANA 17 - 19 SEP 2010_isolation/18 SEP - 5$ - 1130 AM_isolation/04 NA GARZ MUJHEY HARAM SE.normalized.txt`.
+- `data/gazetteer_review.md` exists and was approved by the user before
+  `data/gazetteer.json` was generated. Every applied rewrite traces to an approved line.
+- Chunker invariants on a re-chunk: no chunk with `len(words) == 1` (baseline 10);
+  no chunk outside the new two-sided ratio bounds; **zero files dead-lettered by
+  `_subdivide_body`** (baseline 40). Chunks *dropped* by a guard are dead-lettered with
+  a reason — `single_token` or `asr_loop` — and the two classifications must not be
+  confused: a 5,000-word `राम` loop is `asr_loop`.
+- Metadata invariants: `track_type` distribution matches the table above exactly
+  (`typed` 4,212 → 5,262); the reclassified distinct titles are printed and contain
+  no song. **73** tracks are stamped `Rishi ji`; zero tracks whose title names *only*
+  Rishi ji are stamped `Swami ji` (baseline 73 such contradictions → 0). The 38
+  dual-speaker tracks keep `Swami ji` by design.
+- **Retrieval A/B against a fresh collection** — a fixed query set run on old and new
+  indexes, including `meditation` and its twin `मेडिटेशन` (today: disjoint result sets),
+  plus `पूरन सिंह`. Recall improvement reported, not asserted.
+- A timestamped entry appended to `doc.md`.
+
+**Commit:** `feat(ingest): deterministic Hindi normalization, entity gazetteer, and chunker/metadata repair (Phase 17)`
+
+**Explicitly out of scope:** the LLM re-clean (Route B). Tier-3 errors — a valid word
+misheard as another valid word, e.g. `ठंडाई` for `तन्हाई` — survive this phase by choice.
+Whether to spend 10–16 h of GPU on them is decided *after* the A/B numbers exist.
 
 ---
 

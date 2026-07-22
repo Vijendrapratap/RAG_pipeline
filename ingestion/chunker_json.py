@@ -21,7 +21,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Iterable
 
-from ingestion.chunker_text import split_sentences
+from ingestion.chunker_text import WORDS_TO_TOKENS, estimate_tokens, split_sentences
 from ingestion.utils.path_parser import PRIMARY_SPEAKER, PathMetadata, parse_path
 
 TARGET_TOKENS = 450
@@ -41,17 +41,6 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("chunker_json")
-
-
-def estimate_tokens(text: str) -> int:
-    """Heuristic token count: words * 1.3 (English baseline).
-
-    Tokenizer is not locked by PRD; this avoids a heavy transformers/tiktoken
-    dep at chunk time. Conservative for non-Latin scripts (produces slightly
-    smaller chunks, which only helps retrieval quality).
-    """
-    words = len(text.split())
-    return max(1, round(words * 1.3))
 
 
 def fmt_hms(sec: float | None) -> str:
@@ -113,11 +102,12 @@ def _render_chunk(
     starts = [s["start"] for s in buf if s["start"] is not None]
     ends = [s["end"] for s in buf if s["end"] is not None]
     speakers = sorted({s["speaker"] for s in buf if s["speaker"]})
-    # Per PRD §6 Phase 12: every file in this corpus is Swami ji's voice.
-    # If diarization produced no labels, fall back to PRIMARY_SPEAKER so
-    # speaker-based filters still match.
+    # Diarization is 0/9,335 corpus-wide, so this fallback is what actually
+    # populates the speaker facet. Use the title-derived speaker, not the module
+    # default: a `SAMBODHAN - RISHI JI` track is Rishi ji's, and hardcoding
+    # PRIMARY_SPEAKER here made a Rishi-ji query return empty (PRD Phase 17).
     if not speakers and path_meta is not None:
-        speakers = [PRIMARY_SPEAKER]
+        speakers = [path_meta.primary_speaker or PRIMARY_SPEAKER]
     start_sec = min(starts) if starts else None
     end_sec = max(ends) if ends else None
     speakers_label = ", ".join(speakers) if speakers else "unknown"
@@ -143,22 +133,43 @@ def _render_chunk(
     return chunk
 
 
+def _window_split(sent: str) -> list[str]:
+    """Last-resort split of a single sentence that has no internal boundary.
+
+    Packs whole words up to MAX_TOKENS. Never truncates: every word survives in
+    exactly one piece. Used only when punctuation is absent (an ASR artifact),
+    where the alternative is dead-lettering an otherwise-usable transcript.
+    """
+    max_words = max(1, int(MAX_TOKENS / WORDS_TO_TOKENS))
+    words = sent.split()
+    return [" ".join(words[i:i + max_words]) for i in range(0, len(words), max_words)] or [sent]
+
+
 def _subdivide_body(body: str, source_name: str) -> list[str]:
     """Split an oversize body into <= MAX_TOKENS pieces on sentence boundaries
-    (danda-aware via ``split_sentences``). Raises ``ValueError`` if a single
-    sentence still exceeds MAX_TOKENS — never truncate silently; the file
-    dead-letters loudly instead (caught by ``process_file``)."""
+    (danda-aware via ``split_sentences``).
+
+    A sentence that alone exceeds MAX_TOKENS has no punctuation to split on —
+    it is a Whisper artifact, not prose. Previously this raised and the whole
+    file dead-lettered. Now it is window-split on word boundaries and logged
+    loudly: the file is degraded, not discarded. Nothing is ever truncated.
+    """
     pieces: list[str] = []
     cur: list[str] = []
     cur_tok = 0
     for sent in split_sentences(body):
         s_tok = estimate_tokens(sent)
         if s_tok > MAX_TOKENS:
-            raise ValueError(
-                f"{source_name}: a single sentence of ~{s_tok} est-tokens "
-                f"exceeds MAX_TOKENS={MAX_TOKENS} and cannot be split on "
-                f"sentence boundaries (likely no punctuation / an ASR artifact)"
-            )
+            log.warning(
+                "%s: a single sentence of ~%d est-tokens exceeds MAX_TOKENS=%d "
+                "(no punctuation / an ASR artifact); window-splitting on word "
+                "boundaries into %d pieces", source_name, s_tok, MAX_TOKENS,
+                -(-len(sent.split()) // max(1, int(MAX_TOKENS / WORDS_TO_TOKENS))))
+            if cur:
+                pieces.append(" ".join(cur))
+                cur, cur_tok = [], 0
+            pieces.extend(_window_split(sent))
+            continue
         if cur and cur_tok + s_tok > MAX_TOKENS:
             pieces.append(" ".join(cur))
             cur, cur_tok = [], 0
@@ -200,6 +211,24 @@ def _emit_guarded(
             dead_letters.append({
                 "source_file": source_name, "start_sec": start,
                 "reason": f"asr_loop uniq_ratio={round(ratio, 4)} words={wc}",
+                "head": body[:200].replace("\n", " "),
+            })
+        return
+    # Runs *below* the loop guard on purpose: a long "राम राम राम …" loop must keep
+    # its established `asr_loop` classification (audit_chunks.py keys on the ratio).
+    # This catches only what MIN_LOOP_WORDS deliberately exempts — a chunk whose
+    # whole content is one token, e.g. a lone `ओ` spanning 16 s. That exemption is
+    # right for a 12-word invocation and wrong here. A one-word chunk carries
+    # nothing retrievable either way, so both are dropped, and never silently.
+    words = body.split()
+    if len(set(words)) == 1:
+        start = next((s["start"] for s in buf if s["start"] is not None), None)
+        log.warning("%s: dropping single-token chunk (start=%s token=%r words=%d) "
+                    "— not embedded", source_name, start, words[0], len(words))
+        if dead_letters is not None:
+            dead_letters.append({
+                "source_file": source_name, "start_sec": start,
+                "reason": f"single_token token={words[0]!r} words={len(words)}",
                 "head": body[:200].replace("\n", " "),
             })
         return

@@ -38,6 +38,23 @@ def test_split_sentences_preserves_unicode():
     assert any("مرحبا" in s for s in out)
 
 
+# ---- Phase 17: a danda glued to the next word must still split ------------
+
+
+def test_split_sentences_on_danda_with_no_following_space():
+    # 117 occurrences in an 800-file sample. The whitespace-only rule left these
+    # welded into one giant "sentence", which then forced a window-split.
+    assert ct.split_sentences("पहला वाक्य।दूसरा वाक्य।") == ["पहला वाक्य।", "दूसरा वाक्य।"]
+    assert ct.split_sentences("पहला॥दूसरा") == ["पहला॥", "दूसरा"]
+
+
+def test_split_sentences_does_not_split_a_glued_latin_period():
+    # The zero-width rule is danda-only on purpose: applying it to '.' would
+    # tear apart decimals and abbreviations.
+    assert ct.split_sentences("value is 3.14 exactly") == ["value is 3.14 exactly"]
+    assert ct.split_sentences("Dr.Sharma spoke") == ["Dr.Sharma spoke"]
+
+
 def test_empty_input_zero_chunks():
     assert ct.chunk_sentences([], "empty.txt") == []
 

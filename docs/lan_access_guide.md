@@ -25,14 +25,28 @@ On your PC, open any web browser.
 In the address bar, type exactly:
 
 ```
-http://192.168.1.143:8080
+http://DESKTOP-MGLTBG3:8081
 ```
 
-Press **Enter**. If the page does not load, the host PC may be asleep or the
-stack may not be running — let Vishvas know.
+Press **Enter**. This uses the host PC's **name**, which never changes — so the
+link keeps working even after the host reboots and its network address changes.
 
-> **Note:** The IP address above is fixed to this network. If the host PC ever
-> gets a new IP (rare), Vishvas will need to update this guide.
+If your device can't find that name (some phones/Macs don't resolve Windows PC
+names), use the numeric address instead — ask Vishvas for the current one, or try:
+
+```
+http://192.168.1.126:8081
+```
+
+If neither loads, the host PC may be asleep or the stack may not be running —
+let Vishvas know.
+
+> **Note (Vishvas):** Prefer the hostname link above — it survives DHCP address
+> changes. The numeric address is a DHCP lease and *will* drift on reboot unless
+> pinned. To pin it permanently, add a **DHCP reservation** on the router
+> (admin page, usually `http://192.168.1.1`) binding this host's Wi-Fi adapter
+> **MAC `E4-1F-D5-31-A8-99`** to a fixed address, then put that address here.
+> The port is `8081` because `docker-compose.override.yml` maps the dashboard there.
 
 ---
 

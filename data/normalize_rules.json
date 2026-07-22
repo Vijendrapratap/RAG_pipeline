@@ -1,0 +1,70 @@
+{
+  "loanword_tokens": {
+    "मEDITATION": "मेडिटेशन",
+    "मEDITेशन": "मेडिटेशन",
+    "मeditation": "मेडिटेशन",
+    "मEDITATORS": "मेडिटेटर्स",
+    "थॉUGHT": "थॉट",
+    "थॉUGHTS": "थॉट्स",
+    "सittings": "सिटिंग्स",
+    "मENTAL": "मेंटल",
+    "वIBRATION": "वाइब्रेशन",
+    "मैनifest": "मैनिफेस्ट",
+    "ब्रेathing": "ब्रीदिंग"
+  },
+  "native_tokens": {
+    "रishi": "रिशी",
+    "रishियों": "रिशियों",
+    "रishiयों": "रिशियों",
+    "रishiओं": "रिशियों",
+    "Kumarों": "कुमारों",
+    "सद्गuru": "सद्गुरु",
+    "रindo": "रिंदो",
+    "रindों": "रिंदों",
+    "रind": "रिंद",
+    "निभaya": "निभाया",
+    "बaki": "बाकी",
+    "कismet": "किस्मत",
+    "बazaar": "बाज़ार",
+    "तirth": "तीर्थ",
+    "घबरaya": "घबराया",
+    "इनayat": "इनायत",
+    "गुरुनanak": "गुरुनानक",
+    "प्रahalad": "प्रहलाद",
+    "कलiforniya": "कैलिफोर्निया",
+    "कलifornia": "कैलिफोर्निया",
+    "बदरिनath": "बद्रीनाथ"
+  },
+  "spelling_scatter": {
+    "मीडिटेशन": "मेडिटेशन",
+    "मैडिटेशन": "मेडिटेशन",
+    "मेंडिटेशन": "मेडिटेशन",
+    "मेडिटीशन": "मेडिटेशन",
+    "मिडिटेशन": "मेडिटेशन",
+    "मेडिटिशन": "मेडिटेशन"
+  },
+  "hallucination_tokens": [
+    "सब्सक्राइब",
+    "सबस्क्राइब"
+  ],
+  "hallucination_tail": [
+    "करते",
+    "करतें",
+    "करें",
+    "करो",
+    "करने",
+    "करेंगे",
+    "कर",
+    "दो",
+    "हैं",
+    "है"
+  ],
+  "loop_min_run": 6,
+  "loop_keep": 3,
+  "_notes": {
+    "targets": "Every target is attested in the corpus with >= 5 occurrences.",
+    "रिशी": "corpus-dominant (342) over रिशि (207); standard ऋषि has 0 occurrences. Corpus-dominant is not orthographically standard - needs human ratification.",
+    "substring": "Every map is exact WHOLE-TOKEN. डांसिंग contains सिंग; डिस्लाइक contains लाइक; पोटेंशियल contains टेंशन.",
+    "not_rewritten": "Cross-script bridging (mind/माइंड) is a query-time synonym table, never a rewrite: 43.9% of Latin 'watch' is inside verbatim English speech."
+  }
+}

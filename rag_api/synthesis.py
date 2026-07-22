@@ -39,6 +39,25 @@ _THINK_CLOSE_RE = re.compile(r"</think\s*>", re.IGNORECASE)
 
 log = logging.getLogger("rag_api.synthesis")
 
+# Fixed reply for the router's `chitchat` class (greeting / small talk / meta
+# question) — keyed by answer language. No retrieval, no GPU call: the reranker
+# scores a bare "hi" at ~0.55, so these must be answered before the pipeline,
+# not filtered after it. A capability blurb doubles as onboarding.
+CHITCHAT_MESSAGE: dict[str, str] = {
+    LANG_HINDI: (
+        "नमस्ते! मैं स्वामी जी के प्रवचनों (सत्संग) के अभिलेख के लिए एक शोध "
+        "सहायक हूँ। आप मुझसे प्रवचनों के विषयों, व्यक्तियों, कथाओं या किसी "
+        "विशेष अंश के बारे में पूछ सकते हैं — जैसे: \"ध्यान के बारे में "
+        "स्वामी जी ने क्या कहा है?\""
+    ),
+    LANG_ENGLISH: (
+        "Namaste! I am a research assistant for Swami ji's recorded discourses "
+        "(satsang / pravachan). Ask me about the topics, people, or stories in "
+        "the discourses — for example: \"What does Swami ji say about "
+        "meditation?\""
+    ),
+}
+
 # Shown when retrieval returns nothing — keyed by answer language.
 NO_CONTEXT_MESSAGE: dict[str, str] = {
     LANG_HINDI: (
@@ -50,6 +69,35 @@ NO_CONTEXT_MESSAGE: dict[str, str] = {
         "to answer this question. Try rephrasing it."
     ),
 }
+
+
+def chitchat_reply(answer_lang: str) -> str:
+    """The fixed chitchat answer in `answer_lang` (English fallback)."""
+    return CHITCHAT_MESSAGE.get(answer_lang, CHITCHAT_MESSAGE[LANG_ENGLISH])
+
+
+def build_chitchat_system(answer_lang: str) -> str:
+    """System prompt for the LLM-written chitchat reply (RAG_CHITCHAT_LLM).
+
+    No retrieval feeds this turn, so the one hard rule is: never invent
+    discourse content — the reply may describe capabilities and chat socially,
+    then invite an archive question.
+    """
+    label = language_label(answer_lang)
+    return (
+        "You are the assistant of a searchable archive of Swami ji's recorded "
+        "discourses (satsang / pravachan) in Hindi and English.\n"
+        "The user's message is a greeting or a question about you / this app — "
+        f"not an archive question. Reply in {label}, warm and brief "
+        "(at most 3-4 short sentences).\n"
+        "If asked what you can do: you answer questions about the discourses "
+        "with cited passages (Hindi or English), find and list sittings on a "
+        'topic ("10 sittings about rain"), rank the best sittings on a topic, '
+        "pull out Swami ji's exact key lines from a sitting, and locate a "
+        "pasted quote.\n"
+        "Never invent or quote discourse content in this reply — invite the "
+        "user to ask an archive question instead."
+    )
 
 
 def build_context_block(results: list[dict[str, Any]]) -> str:
@@ -76,6 +124,10 @@ def build_context_block(results: list[dict[str, Any]]) -> str:
             ("session_time", "Time"), ("track_title", "Track"),
             ("track_type", "Type"), ("location", "Location"),
             ("season", "Season"),
+            # Best-sitting ranking stats (rag_api.best) — absent on all other
+            # flows, so these lines only appear on best_sittings turns.
+            ("mention_count", "Mentions"), ("duration_min", "Length (min)"),
+            ("play_count", "Plays"),
         ):
             if meta.get(key):
                 meta_bits.append(f"{label}: {meta[key]}")
@@ -145,6 +197,81 @@ def build_user_prompt(query: str, context_block: str, answer_lang: str) -> str:
     )
 
 
+def build_list_question(query: str, n: int, answer_lang: str) -> str:
+    """Wrap a list-intent query ("10 sittings for rain") into an explicit
+    numbered-list instruction for the answer model.
+
+    Used when the planner flags `list_sittings`: retrieval returns one
+    summary passage per sitting, and this wrapper — passed to the synthesizer
+    in place of the raw query — makes the model enumerate them instead of
+    writing one essay. Pure; the existing system prompt (grounding, citation,
+    language rules) still applies, so entries stay METADATA-grounded.
+    """
+    label = language_label(answer_lang)
+    return (
+        f'The user asked: "{query}"\n\n'
+        f"The passages above each describe one sitting (recorded discourse). "
+        f"Select up to {n} sittings whose passage genuinely relates to the "
+        "TOPIC of this request — the request's literal wording will not "
+        "appear in the passages, so judge by meaning, not by matching the "
+        f"phrase. Present them as a numbered list in {label}: for each entry "
+        "give the date, event and track from its METADATA line, then one "
+        "sentence on why it relates, citing the passage number like [N]. "
+        "If fewer genuinely relate, list fewer and say so."
+    )
+
+
+def build_verbatim_question(query: str, answer_lang: str) -> str:
+    """Wrap a verbatim-summary query ("summary of the sitting on rain") into
+    an exact-quote bullet instruction for the answer model.
+
+    Used when the planner flags `verbatim`: the user wants Swami ji's OWN
+    words, so every bullet must be copied word-for-word from a passage TEXT —
+    never translated, never paraphrased. Pure; the system prompt's grounding
+    and citation rules still apply.
+    """
+    label = language_label(answer_lang)
+    return (
+        f'The user asked: "{query}"\n\n'
+        "They want Swami ji's OWN words, not a summary in your words. From "
+        "the passages above, pick the most substantive lines (up to 10) and "
+        "present them as a bullet list. Each bullet must be an EXACT, "
+        "word-for-word quote copied from one passage's TEXT — same language, "
+        "same script, no translation, no paraphrase, no added or dropped "
+        "words — followed by its passage number like [N]. Skip passages that "
+        "do not relate to the request's topic. You may add one short framing "
+        f"sentence in {label} before the list; every bullet itself stays in "
+        "the passage's original words."
+    )
+
+
+def build_best_question(query: str, n: int, answer_lang: str) -> str:
+    """Wrap a best-sittings query ("best sittings on rain") into a ranked
+    numbered-list instruction for the answer model.
+
+    Used when the planner flags `best_sittings`: retrieval (rag_api.best)
+    returns one summary passage per sitting, already ordered best-first by
+    the composite score; the METADATA line carries Mentions / Length / Plays
+    so the model can say why a sitting ranks where it does. Pure.
+    """
+    label = language_label(answer_lang)
+    return (
+        f'The user asked: "{query}"\n\n'
+        "The passages above each describe one sitting (recorded discourse), "
+        "already ordered BEST FIRST by a ranking that combines topic "
+        "relevance, how often the topic's words occur in the sitting "
+        "(Mentions), the sitting's length (Length) and how often it has "
+        f"been played (Plays) — see each METADATA line. Present up to {n} "
+        f"sittings as a numbered list in {label}, keeping this order: for "
+        "each entry give the date, event and track from its METADATA line, "
+        "then one sentence on why it ranks there — topic fit plus its "
+        "Mentions/Length/Plays when notable — citing the passage number "
+        "like [N]. Judge topic fit by meaning, not by matching the request's "
+        "literal wording. If a passage does not relate to the topic at all, "
+        "leave it out and say so."
+    )
+
+
 def trim_by_relevance(
     results: list[dict[str, Any]], ratio: float,
 ) -> list[dict[str, Any]]:
@@ -169,6 +296,36 @@ def trim_by_relevance(
     cutoff = top * ratio
     kept = [r for r in results if float(r.get("score") or 0.0) >= cutoff]
     return kept or results[:1]
+
+
+def filter_min_score(
+    results: list[dict[str, Any]], min_score: float,
+    allow_abstain: bool = False,
+) -> list[dict[str, Any]]:
+    """Keep only passages scoring strictly above ``min_score`` (the citation floor).
+
+    Applied to the chat answer flow so only sufficiently-relevant passages are
+    cited and shown in the UI. The reranker's relevance score is ~[0,1]; the
+    floor (calibrated to ~0.03 from §0.2) trims the weak tail the model would
+    otherwise pad an answer with. Results are score-sorted, so the kept set is a
+    prefix — citation numbers still line up with the cards the UI shows.
+
+    ``allow_abstain`` controls what happens when *nothing* clears the floor:
+      * ``False`` (default): keep the single best passage so the chat still
+        answers instead of going blank — the safety net that makes a
+        miscalibrated floor invisible.
+      * ``True``: return ``[]`` so the caller abstains (→ NO_CONTEXT_MESSAGE,
+        0 citations). Only sound once §3.2 certifies a floor that does not
+        refuse legitimate cross-script hits.
+
+    ``min_score <= 0`` disables the floor.
+    """
+    if min_score <= 0 or not results:
+        return results
+    kept = [r for r in results if float(r.get("score") or 0.0) > min_score]
+    if kept:
+        return kept
+    return [] if allow_abstain else results[:1]
 
 
 def _strip_think_block(text: str) -> str:
@@ -298,17 +455,16 @@ class Synthesizer:
         return None
 
     def _ollama_body(
-        self, query: str, results: list[dict[str, Any]], answer_lang: str,
-        model: str, *, stream: bool,
+        self, messages: list[dict[str, str]], model: str,
+        *, stream: bool, think: bool | None,
     ) -> dict[str, Any]:
         """Build the /api/chat request body, adding `think` only when set."""
         body: dict[str, Any] = {
             "model": model,
-            "messages": self._messages(query, results, answer_lang),
+            "messages": messages,
             "stream": stream,
             "options": self._ollama_options(),
         }
-        think = self._ollama_think()
         if think is not None:
             body["think"] = think
         return body
@@ -346,6 +502,60 @@ class Synthesizer:
             return "openrouter", self.settings.openrouter_model
         return "ollama", self.settings.chat_model
 
+    # ----- chitchat (no retrieval) -----
+
+    def _chitchat_messages(
+        self, query: str, answer_lang: str,
+        history: list[dict[str, Any]] | None,
+    ) -> list[dict[str, str]]:
+        """Chitchat prompt: capability system prompt + a few recent turns for
+        continuity + the user's message. History is clipped hard — this path
+        must stay cheap."""
+        msgs: list[dict[str, str]] = [
+            {"role": "system", "content": build_chitchat_system(answer_lang)},
+        ]
+        for h in (history or [])[-4:]:
+            q = str(h.get("question") or "").strip()
+            a = str(h.get("answer") or "").strip()
+            if q:
+                msgs.append({"role": "user", "content": q[:500]})
+            if a:
+                msgs.append({"role": "assistant", "content": a[:500]})
+        msgs.append({"role": "user", "content": query})
+        return msgs
+
+    def chitchat_generate(
+        self, query: str, answer_lang: str,
+        history: list[dict[str, Any]] | None = None,
+        *, provider: str | None = None, model: str | None = None,
+    ) -> str:
+        """LLM-written reply for the chitchat class — no retrieval, no
+        citations. think=False on ollama: a reasoning chain on "hi" is pure
+        latency. Raises on provider errors; the caller falls back to the
+        fixed `chitchat_reply`."""
+        prov, mdl = self._resolve(provider, model)
+        messages = self._chitchat_messages(query, answer_lang, history)
+        if prov == "openrouter":
+            content = self._generate_openrouter(messages, mdl)
+        else:
+            content = self._generate_ollama(messages, mdl, think=False)
+        return _strip_think_block(content).strip()
+
+    def chitchat_stream(
+        self, query: str, answer_lang: str,
+        history: list[dict[str, Any]] | None = None,
+        *, provider: str | None = None, model: str | None = None,
+    ) -> Iterator[str]:
+        """Streaming variant of `chitchat_generate`."""
+        prov, mdl = self._resolve(provider, model)
+        messages = self._chitchat_messages(query, answer_lang, history)
+        raw = (
+            self._stream_openrouter(messages, mdl)
+            if prov == "openrouter"
+            else self._stream_ollama(messages, mdl, think=False)
+        )
+        yield from self._filter_think(raw)
+
     # ----- non-streaming -----
 
     def generate(
@@ -357,10 +567,11 @@ class Synthesizer:
             return self._no_context(answer_lang)
         results = trim_by_relevance(results, self.settings.synthesis_min_score_ratio)
         prov, mdl = self._resolve(provider, model)
+        messages = self._messages(query, results, answer_lang)
         if prov == "openrouter":
-            content = self._generate_openrouter(query, results, answer_lang, mdl)
+            content = self._generate_openrouter(messages, mdl)
         else:
-            content = self._generate_ollama(query, results, answer_lang, mdl)
+            content = self._generate_ollama(messages, mdl, self._ollama_think())
         content = _strip_think_block(content).strip()
         if not content:
             log.warning(
@@ -370,28 +581,25 @@ class Synthesizer:
         return content
 
     def _generate_ollama(
-        self, query: str, results: list[dict[str, Any]], answer_lang: str,
-        model: str,
+        self, messages: list[dict[str, str]], model: str, think: bool | None,
     ) -> str:
         r = self._session.post(
             f"{self.settings.ollama_url}/api/chat",
-            json=self._ollama_body(query, results, answer_lang, model,
-                                   stream=False),
+            json=self._ollama_body(messages, model, stream=False, think=think),
             timeout=self.settings.chat_timeout_s,
         )
         r.raise_for_status()
         return ((r.json().get("message") or {}).get("content") or "")
 
     def _generate_openrouter(
-        self, query: str, results: list[dict[str, Any]], answer_lang: str,
-        model: str,
+        self, messages: list[dict[str, str]], model: str,
     ) -> str:
         r = self._session.post(
             self._openrouter_endpoint("/chat/completions"),
             headers=self._openrouter_headers(),
             json={
                 "model": model,
-                "messages": self._messages(query, results, answer_lang),
+                "messages": messages,
                 "stream": False,
                 "temperature": self.settings.chat_temperature,
                 "max_tokens": self.settings.openrouter_max_tokens,
@@ -403,8 +611,8 @@ class Synthesizer:
         choices = body.get("choices") or []
         if not choices:
             log.warning(
-                "openrouter returned no choices for %r (body keys: %s)",
-                query, list(body.keys()),
+                "openrouter returned no choices (body keys: %s)",
+                list(body.keys()),
             )
             return ""
         return ((choices[0].get("message") or {}).get("content") or "")
@@ -425,11 +633,17 @@ class Synthesizer:
             return
         results = trim_by_relevance(results, self.settings.synthesis_min_score_ratio)
         prov, mdl = self._resolve(provider, model)
+        messages = self._messages(query, results, answer_lang)
         raw_stream = (
-            self._stream_openrouter(query, results, answer_lang, mdl)
+            self._stream_openrouter(messages, mdl)
             if prov == "openrouter"
-            else self._stream_ollama(query, results, answer_lang, mdl)
+            else self._stream_ollama(messages, mdl, self._ollama_think())
         )
+        yield from self._filter_think(raw_stream)
+
+    @staticmethod
+    def _filter_think(raw_stream: Iterator[str]) -> Iterator[str]:
+        """Pass a raw delta stream through the <think>-block filter."""
         flt = _ThinkFilter()
         for delta in raw_stream:
             out = flt.feed(delta)
@@ -440,13 +654,11 @@ class Synthesizer:
             yield tail
 
     def _stream_ollama(
-        self, query: str, results: list[dict[str, Any]], answer_lang: str,
-        model: str,
+        self, messages: list[dict[str, str]], model: str, think: bool | None,
     ) -> Iterator[str]:
         with self._session.post(
             f"{self.settings.ollama_url}/api/chat",
-            json=self._ollama_body(query, results, answer_lang, model,
-                                   stream=True),
+            json=self._ollama_body(messages, model, stream=True, think=think),
             timeout=self.settings.chat_timeout_s,
             stream=True,
         ) as r:
@@ -466,15 +678,14 @@ class Synthesizer:
                     break
 
     def _stream_openrouter(
-        self, query: str, results: list[dict[str, Any]], answer_lang: str,
-        model: str,
+        self, messages: list[dict[str, str]], model: str,
     ) -> Iterator[str]:
         with self._session.post(
             self._openrouter_endpoint("/chat/completions"),
             headers=self._openrouter_headers(),
             json={
                 "model": model,
-                "messages": self._messages(query, results, answer_lang),
+                "messages": messages,
                 "stream": True,
                 "temperature": self.settings.chat_temperature,
                 "max_tokens": self.settings.openrouter_max_tokens,

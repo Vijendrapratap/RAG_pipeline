@@ -5,10 +5,9 @@ import type { Health } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { Login } from "./components/Login";
 import { SearchView } from "./components/SearchView";
-import { AnalyticsView } from "./components/AnalyticsView";
 import { BrainView } from "./components/BrainView";
 
-type Tab = "search" | "analytics" | "archive";
+type Tab = "search" | "archive";
 
 const COLLAPSE_KEY = "vishvas.sidebar.collapsed";
 
@@ -137,11 +136,9 @@ export function App() {
             key={chatSessionKey}
             onAuthFail={handleAuthFail}
             activeConversationId={activeConversationId}
-            onActiveConversationChange={setActiveConversationId}
             onConversationSaved={bumpHistory}
           />
         )}
-        {tab === "analytics" && <AnalyticsView onAuthFail={handleAuthFail} />}
         {tab === "archive" && <BrainView onAuthFail={handleAuthFail} />}
       </main>
     </div>

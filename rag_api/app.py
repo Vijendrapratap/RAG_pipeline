@@ -38,9 +38,10 @@ from pydantic import BaseModel, Field
 
 from rag_api import tracks
 from rag_api.analytics import Analytics
+from rag_api.best import BestSittings
 from rag_api.config import Settings, get_settings
 from rag_api.corpus import CorpusReader
-from rag_api.db import VocabCache
+from rag_api.db import VocabCache, record_play
 from rag_api.history import History
 from rag_api.lang import resolve_language
 from rag_api.pageindex import PageIndexRetriever
@@ -48,9 +49,14 @@ from rag_api.query_parse import (
     detect_quote, detect_signals, merge_filters, signals_to_filters,
 )
 from rag_api.followup import FollowupRewriter
+from rag_api.ground import GroundChecker
+from rag_api.planner import INTENT_BEST, INTENT_LIST, INTENT_VERBATIM, Planner
 from rag_api.retrieval import Retriever
 from rag_api.route import route
-from rag_api.synthesis import Synthesizer
+from rag_api.synthesis import (
+    Synthesizer, build_best_question, build_list_question,
+    build_verbatim_question, chitchat_reply, filter_min_score,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,7 +114,7 @@ class SearchRequest(BaseModel):
     find_quote: bool = False
     scope: RetrievalScope = "chunks"
     backend: RetrievalBackend | None = None
-    top_k: int = Field(8, ge=1, le=40)
+    top_k: int = Field(4, ge=1, le=40)
     filters: FilterModel = Field(default_factory=FilterModel)
     # Extract metadata filters from the query text. Strong signals (years,
     # ISO dates) are applied; soft ones (season/topic words) are only
@@ -130,7 +136,7 @@ class QueryRequest(BaseModel):
     find_quote: bool = False
     scope: RetrievalScope = "chunks"
     backend: RetrievalBackend | None = None
-    top_k: int = Field(8, ge=1, le=40)
+    top_k: int = Field(4, ge=1, le=40)
     filters: FilterModel = Field(default_factory=FilterModel)
     auto_filters: bool = True
     expand_query: bool = False
@@ -168,6 +174,9 @@ async def lifespan(app: FastAPI):
     app.state.pageindex = PageIndexRetriever(settings, app.state.retriever)
     app.state.followup = FollowupRewriter(settings)
     app.state.synthesizer = Synthesizer(settings)
+    app.state.ground = GroundChecker(settings)
+    app.state.planner = Planner(settings)
+    app.state.best = BestSittings(settings)
     app.state.analytics = Analytics(settings.pg_dsn)
     app.state.history = History(settings.pg_dsn)
     app.state.corpus = CorpusReader(settings.pg_dsn)
@@ -330,6 +339,7 @@ def _retrieve(
     find_quote: bool, scope: str, backend: str,
     filters: dict[str, Any], top_k: int, dense_text: str,
     include_catalog: bool = False, bm25_weight: float | None = None,
+    plan: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Route a retrieval request to the right pipeline. `find_quote` is always
     a chunk-level lexical quote hunt (hybrid only — PageIndex has no lexical
@@ -354,8 +364,52 @@ def _retrieve(
         return retriever.search_two_stage(query, filters, top_k, dense_text=dt)
     if scope == "catalog":
         return retriever.search_catalog(query, filters, top_k, dense_text=dt)
+    # Agentic plan (chunk scope only — `_prepare` guarantees that): list
+    # intent retrieves at the sitting level (one summary result per file);
+    # best intent re-ranks sittings by relevance + mentions + length + plays;
+    # verbatim intent is a chunk search with a boosted budget (the answer
+    # quotes exact lines, so coverage matters); a multi-query plan runs every
+    # variant and merges.
+    if plan:
+        s: Settings = app.state.settings
+        if plan["intent"] == INTENT_BEST:
+            return app.state.best.rank(
+                retriever, plan["queries"], filters,
+                top_k=max(top_k, plan["n"] or top_k), pool=s.list_top_k)
+        if plan["intent"] == INTENT_LIST:
+            return retriever.search_summaries_multi(
+                plan["queries"], filters, top_k=max(top_k, plan["n"] or top_k))
+        if plan["intent"] == INTENT_VERBATIM:
+            # Always search the plan's queries: the planner stripped the
+            # summary meta-words from them ("summary of X" reranks ~0 against
+            # transcript prose), so `query` here is NOT the right search text.
+            return retriever.search_multi(
+                plan["queries"], filters, max(top_k, s.verbatim_top_k),
+                bm25_weight=bm25_weight, dense_text=dt,
+                include_catalog=include_catalog)
+        if len(plan["queries"]) > 1:
+            return retriever.search_multi(
+                plan["queries"], filters, top_k, bm25_weight=bm25_weight,
+                dense_text=dt, include_catalog=include_catalog)
     return retriever.search(query, filters, top_k, bm25_weight=bm25_weight,
                             dense_text=dt, include_catalog=include_catalog)
+
+
+def _route_info(
+    query_class: str | None, bm25_weight: float | None,
+    include_catalog: bool, rewritten: str | None, retrieve: bool = True,
+    plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The routing summary `_prepare` returns to the handlers (echoed in the
+    response and used by `_retrieve`). ``retrieve=False`` (chitchat only) tells
+    the handler to answer with a fixed reply — no retrieval, no synthesis.
+    ``plan`` is the agentic planner's verdict (``{intent, queries, n}``, n
+    already clamped) or None when the planner is off / had nothing to add."""
+    return {
+        "query_class": query_class, "bm25_weight": bm25_weight,
+        "include_catalog": include_catalog, "rewritten_query": rewritten,
+        "retrieve": retrieve, "plan": plan,
+    }
 
 
 def _prepare(req: SearchRequest | QueryRequest) -> tuple[
@@ -404,6 +458,12 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
             rewritten = app.state.followup.rewrite(req.query, history)
             decision = route(rewritten, s, history_present=False)
             query_class = decision.query_class
+        if not decision.retrieve:
+            # Chitchat: never reaches the retriever — the reranker scores a
+            # bare "hi" at ~0.55, far above any sane citation floor, so a
+            # greeting must be gated here, not filtered downstream.
+            return {}, [], "", False, req.query, _route_info(
+                query_class, None, False, rewritten, retrieve=False)
         if decision.find_quote:
             find_quote, query = True, decision.query
         else:
@@ -417,11 +477,8 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
             find_quote, query = True, qd.query
 
     if find_quote:
-        return {}, [], "", find_quote, query, {
-            "query_class": query_class or "quote",
-            "bm25_weight": None, "include_catalog": False,
-            "rewritten_query": rewritten,
-        }
+        return {}, [], "", find_quote, query, _route_info(
+            query_class or "quote", None, False, rewritten)
 
     explicit = {k: v for k, v in req.filters.model_dump().items()
                 if v is not None}
@@ -438,18 +495,34 @@ def _prepare(req: SearchRequest | QueryRequest) -> tuple[
             effective["date_range"] = (f"{y}-01-01", f"{y}-12-31")
     effective.pop("year", None)
 
+    # Agentic planner (RAG_PLANNER): detects list intent ("10 sittings for
+    # rain") and adds bilingual/synonym retrieval variants ("barish" → बारिश /
+    # rain). Only for the router's retrieval classes — chitchat/quote already
+    # returned above — and only on the default chunk scope (an explicit scope
+    # is the caller's choice). Fail-open: no plan = today's pipeline.
+    plan: dict[str, Any] | None = None
+    if (s.planner_enabled and query_class in ("thematic", "name", "analytic")
+            and req.scope == "chunks" and (query or "").strip()):
+        p = app.state.planner.plan(query)
+        if p is not None:
+            n = (min(p.n or 10, s.list_top_k)
+                 if p.intent in (INTENT_LIST, INTENT_BEST) else None)
+            plan = {"intent": p.intent, "queries": p.queries, "n": n}
+
     # HyDE fires when the caller asks (expand_query) or when the router flags a
     # thematic query and RAG_HYDE_THEMATIC is on (4.2). One ~1 s chat round-trip.
+    # A multi-query plan supersedes it: the variants already bridge vocabulary,
+    # and list/best-intent retrieval is summary-level — either way a second LLM
+    # call would buy nothing.
     dense_text = ""
-    if req.expand_query or (route_expand and s.hyde_thematic_enabled):
+    multi = bool(plan and len(plan["queries"]) > 1)
+    summary_intent = bool(plan and plan["intent"] in (INTENT_LIST, INTENT_BEST))
+    if not (multi or summary_intent) and (
+            req.expand_query or (route_expand and s.hyde_thematic_enabled)):
         dense_text = app.state.retriever.make_expansion(req.query)
 
-    return effective, detections, dense_text, find_quote, query, {
-        "query_class": query_class,
-        "bm25_weight": bm25_weight,
-        "include_catalog": include_catalog,
-        "rewritten_query": rewritten,
-    }
+    return effective, detections, dense_text, find_quote, query, _route_info(
+        query_class, bm25_weight, include_catalog, rewritten, plan=plan)
 
 
 @app.post("/api/search", dependencies=[Depends(require_auth)])
@@ -460,12 +533,21 @@ def search(req: SearchRequest) -> dict[str, Any]:
     pageindex: PageIndexRetriever = app.state.pageindex
     backend = _resolve_backend(req)
     effective, detections, dense_text, find_quote, rquery, route_info = _prepare(req)
+    if not route_info["retrieve"]:
+        return {
+            "query": req.query, "plan": None, "find_quote": False,
+            "auto_quote": False,
+            "query_class": route_info["query_class"], "scope": req.scope,
+            "backend": backend, "retrieval_ms": 0.0, "count": 0, "results": [],
+            "detected_filters": [], "applied_filters": {}, "expanded": False,
+        }
     t0 = time.monotonic()
     try:
         results = _retrieve(retriever, pageindex, rquery, find_quote,
                             req.scope, backend, effective, req.top_k, dense_text,
                             include_catalog=route_info["include_catalog"],
-                            bm25_weight=route_info["bm25_weight"])
+                            bm25_weight=route_info["bm25_weight"],
+                            plan=route_info["plan"])
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")
@@ -475,6 +557,7 @@ def search(req: SearchRequest) -> dict[str, Any]:
     retrieval_ms = round((time.monotonic() - t0) * 1000.0, 1)
     return {
         "query": req.query,
+        "plan": route_info["plan"],
         "find_quote": find_quote,
         "auto_quote": find_quote and not req.find_quote,
         "query_class": route_info["query_class"],
@@ -493,6 +576,67 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     """Format one Server-Sent Event. ensure_ascii=False keeps Devanagari
     intact on the wire (the response is UTF-8)."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _chitchat_response(req: QueryRequest, backend: str,
+                       route_info: dict[str, Any],
+                       provider: str | None = None, model: str | None = None):
+    """Reply for the router's chitchat class — no retrieval, no citations.
+    With RAG_CHITCHAT_LLM (default on) the chat model writes a natural reply
+    (capability system prompt + recent turns, think=false); any model failure
+    falls back to the fixed bilingual string, so this path never 5xxes.
+    Mirrors the normal response/SSE shape (0 citations) so the frontend needs
+    no special case."""
+    s: Settings = app.state.settings
+    synthesizer: Synthesizer = app.state.synthesizer
+    answer_language = resolve_language(req.answer_language, req.query)
+    history = getattr(req, "history", None) or []
+    base = {
+        "query": req.query, "plan": None, "find_quote": False,
+        "auto_quote": False,
+        "query_class": route_info["query_class"],
+        "rewritten_query": route_info["rewritten_query"],
+        "scope": req.scope, "backend": backend, "retrieval_ms": 0.0,
+        "answer_language": answer_language, "count": 0, "citations": [],
+        "detected_filters": [], "applied_filters": {}, "expanded": False,
+    }
+    if not req.stream:
+        answer = ""
+        if s.chitchat_llm_enabled:
+            try:
+                answer = synthesizer.chitchat_generate(
+                    req.query, answer_language, history,
+                    provider=provider, model=model)
+            except requests.RequestException as e:
+                log.warning("chitchat LLM failed for %r: %s — fixed reply",
+                            req.query, e)
+        return {**base, "answer": answer or chitchat_reply(answer_language)}
+
+    def event_stream():
+        yield _sse("meta", base)
+        emitted = False
+        if s.chitchat_llm_enabled:
+            try:
+                for delta in synthesizer.chitchat_stream(
+                        req.query, answer_language, history,
+                        provider=provider, model=model):
+                    emitted = True
+                    yield _sse("token", {"text": delta})
+            except requests.RequestException as e:
+                # Fall back only when nothing streamed yet — appending the
+                # canned reply after partial model output would read as noise.
+                log.warning("chitchat LLM stream failed for %r: %s — %s",
+                            req.query, e,
+                            "fixed reply" if not emitted else "partial kept")
+        if not emitted:
+            yield _sse("token", {"text": chitchat_reply(answer_language)})
+        yield _sse("done", {})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/query", dependencies=[Depends(require_auth)])
@@ -514,12 +658,16 @@ def query(req: QueryRequest):
 
     backend = _resolve_backend(req)
     effective, detections, dense_text, find_quote, rquery, route_info = _prepare(req)
+    if not route_info["retrieve"]:
+        return _chitchat_response(req, backend, route_info,
+                                  override_provider, override_model)
     t0 = time.monotonic()
     try:
         results = _retrieve(retriever, pageindex, rquery, find_quote,
                             req.scope, backend, effective, req.top_k, dense_text,
                             include_catalog=route_info["include_catalog"],
-                            bm25_weight=route_info["bm25_weight"])
+                            bm25_weight=route_info["bm25_weight"],
+                            plan=route_info["plan"])
     except requests.RequestException as e:
         raise HTTPException(status_code=502,
                             detail=f"upstream service error: {e}")
@@ -528,19 +676,60 @@ def query(req: QueryRequest):
         raise HTTPException(status_code=500, detail=f"retrieval failed: {e}")
     retrieval_ms = round((time.monotonic() - t0) * 1000.0, 1)
 
+    # Citation floor (chat only): keep only passages the reranker scored above
+    # the configured threshold — those are what gets cited, shown in the UI, and
+    # fed to the answer model. Applied here (not in /api/search) so the model's
+    # numbered context and the displayed citation cards stay in lockstep.
+    # Best-sitting results are exempt: their `score` is the composite rank, not
+    # a relevance — the semantic floor was already applied inside best.rank().
+    s: Settings = app.state.settings
+    plan = route_info["plan"]
+    if not (plan and plan["intent"] == INTENT_BEST):
+        n_before = len(results)
+        results = filter_min_score(results, s.cite_min_score, s.allow_abstain)
+        if len(results) != n_before:
+            log.info(
+                "cite floor %.2f (abstain=%s) dropped %d/%d passages for %r",
+                s.cite_min_score, s.allow_abstain, n_before - len(results),
+                n_before, req.query,
+            )
+
     answer_language = resolve_language(req.answer_language, req.query)
+
+    # Plan-intent synthesis wrappers (grounding / citation rules unchanged):
+    # list — enumerate the retrieved sittings; best — ranked best-first list
+    # with the Mentions/Length/Plays rationale; verbatim — bullet quotes copied
+    # word-for-word. All other intents synthesise the raw query.
+    synth_query = req.query
+    if plan and results:
+        if plan["intent"] == INTENT_LIST:
+            synth_query = build_list_question(
+                req.query, plan["n"] or len(results), answer_language)
+        elif plan["intent"] == INTENT_BEST:
+            synth_query = build_best_question(
+                req.query, plan["n"] or len(results), answer_language)
+        elif plan["intent"] == INTENT_VERBATIM:
+            synth_query = build_verbatim_question(req.query, answer_language)
 
     if not req.stream:
         try:
             answer = synthesizer.generate(
-                req.query, results, answer_language,
+                synth_query, results, answer_language,
                 provider=override_provider, model=override_model,
             )
         except requests.RequestException as e:
             raise HTTPException(status_code=502,
                                 detail=f"answer model error: {e}")
+        if s.groundedness_enabled and results and answer:
+            # Opt-in post-check (RAG_GROUNDEDNESS): drop answer sentences the
+            # judge finds unsupported by the passages. Fail-open inside check().
+            answer, dropped = app.state.ground.check(answer, results)
+            if dropped:
+                log.info("groundedness dropped %d sentence(s) for %r",
+                         dropped, req.query)
         return {
             "query": req.query,
+            "plan": plan,
             "find_quote": find_quote,
             "auto_quote": find_quote and not req.find_quote,
             "query_class": route_info["query_class"],
@@ -560,6 +749,7 @@ def query(req: QueryRequest):
     def event_stream():
         yield _sse("meta", {
             "query": req.query,
+            "plan": plan,
             "find_quote": find_quote,
             "auto_quote": find_quote and not req.find_quote,
             "query_class": route_info["query_class"],
@@ -576,7 +766,7 @@ def query(req: QueryRequest):
         })
         try:
             for delta in synthesizer.stream(
-                req.query, results, answer_language,
+                synth_query, results, answer_language,
                 provider=override_provider, model=override_model,
             ):
                 yield _sse("token", {"text": delta})
@@ -773,6 +963,30 @@ def track_audio(
     return FileResponse(wav, media_type="audio/wav", filename=wav.name)
 
 
+class PlayedRequest(BaseModel):
+    """One listen of a recording, reported by the dashboard's track player."""
+
+    source_file: str = Field(..., max_length=512)
+
+
+@app.post("/api/track/played", dependencies=[Depends(require_auth)])
+def track_played(req: PlayedRequest) -> dict[str, Any]:
+    """Record one play of a recording (migration 004's `play_events`).
+
+    Feeds the best-sitting ranking's popularity signal. The frontend fires
+    this once per listen and ignores failures — playback never depends on it.
+    """
+    sf = (req.source_file or "").strip()
+    if not sf:
+        raise HTTPException(status_code=400, detail="source_file is required")
+    try:
+        record_play(app.state.settings.pg_dsn, sf)
+    except Exception as e:  # noqa: BLE001 - surface, don't swallow
+        log.warning("play event failed for %r: %s", sf, e)
+        raise HTTPException(status_code=502, detail=f"play event failed: {e}")
+    return {"ok": True, "source_file": sf}
+
+
 # --------------------------------------------------------------------------
 # Conversation history — Postgres-backed Q&A log for the sidebar
 # --------------------------------------------------------------------------
@@ -791,7 +1005,7 @@ class HistorySaveRequest(BaseModel):
     answer: str = ""
     mode: Literal["answer", "search"] = "answer"
     scope: RetrievalScope = "chunks"
-    top_k: int = Field(8, ge=1, le=40)
+    top_k: int = Field(4, ge=1, le=40)
     find_quote: bool = False
     expanded: bool = False
     answer_language: str | None = None
@@ -799,6 +1013,9 @@ class HistorySaveRequest(BaseModel):
     applied_filters: dict[str, Any] = Field(default_factory=dict)
     detected_filters: list[dict[str, Any]] = Field(default_factory=list)
     citations: list[dict[str, Any]] = Field(default_factory=list)
+    # Append this turn to an existing thread. None (or absent) starts a new
+    # conversation; the save response echoes the id to reuse for later turns.
+    conversation_id: str | None = None
 
 
 def _run_history(label: str, fn, *args: Any) -> Any:

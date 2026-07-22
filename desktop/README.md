@@ -46,7 +46,7 @@ or set env vars. Precedence: `VISHVAS_*` env > `desktop.config.json` > defaults.
 | `appPort` | `VISHVAS_APP_PORT` | `8080` | canonical rag-api port |
 | `probePorts` | — | `[8080, 8081]` | ports probed for a reachable UI |
 | `dockerDesktop` | `VISHVAS_DOCKER_DESKTOP` | `C:\Program Files\Docker\Docker\Docker Desktop.exe` | started if daemon is down |
-| `chatModel` | `VISHVAS_CHAT_MODEL` | `qwen2.5:7b-instruct-q4_K_M` | model to pre-warm |
+| `chatModel` | `VISHVAS_CHAT_MODEL` | `qwen3.5:9b` | model to pre-warm |
 
 ## Package an installer
 

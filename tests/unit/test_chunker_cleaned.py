@@ -155,6 +155,35 @@ def test_load_cleaned_text_rejects_just_below_the_threshold(tmp_path):
     assert cc.load_cleaned_text(raw2, _prose(1000)) is not None
 
 
+# ---- Phase 17: the guard is two-sided. The cleaner also *invents* content --
+#
+# 453 of 7,040 real pairs expand, up to 3.913x (fabricated "(Third Eye)" glosses,
+# amplified repetition loops). p95 of legitimate cleaning is 1.088, so 1.15 is a
+# symmetric ceiling to the 0.85 floor.
+
+
+def test_load_cleaned_text_rejects_an_expansion(tmp_path):
+    """552 raw words -> 2,160 cleaned was indexed as verbatim speech."""
+    raw = _write_pair(tmp_path, _prose(552), _prose(2160))
+    assert cc.load_cleaned_text(raw, _prose(552)) is None
+
+
+def test_load_cleaned_text_rejects_just_above_the_ceiling(tmp_path):
+    raw = _write_pair(tmp_path, _prose(1000), _prose(1160))
+    assert cc.load_cleaned_text(raw, _prose(1000)) is None
+    raw2 = _write_pair(tmp_path, _prose(1000), _prose(1140))
+    assert cc.load_cleaned_text(raw2, _prose(1000)) is not None
+
+
+def test_expansion_check_precedes_the_degenerate_raw_exemption(tmp_path):
+    """When raw is a repetition loop AND cleaned is several times longer, the
+    cleaner amplified the loop. Raw is the honest text; the exemption that keeps
+    a *condensed* loop cleanup must not also bless an *amplified* one."""
+    loop = " ".join(["ओ"] * 552)
+    raw = _write_pair(tmp_path, loop, _prose(2160))
+    assert cc.load_cleaned_text(raw, loop) is None
+
+
 def test_load_cleaned_text_keeps_cleanup_of_a_whisper_repetition_loop(tmp_path):
     """When raw is 'om om om om ...' a drastically shorter cleaned text is the
     correct output, not a summary. Falling back to raw would re-index the loop."""

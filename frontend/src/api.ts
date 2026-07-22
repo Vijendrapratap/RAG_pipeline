@@ -11,17 +11,15 @@ import type { CorpusStateResponse, CorpusSummary, TrackTranscript } from "./corp
 import type {
   ConversationListResponse,
   ConversationRecord,
+  ConversationTurn,
   FilterOptionsResponse,
   Health,
   HistorySaveBody,
-  MentionsResponse,
   ModelsResponse,
   QueryBody,
   QueryMeta,
   SearchBody,
   SearchResponse,
-  SpeakersResponse,
-  TranscriptsResponse,
 } from "./types";
 
 // Same-origin by default: dev → Vite proxies `/api` to the backend;
@@ -112,31 +110,6 @@ export function search(body: SearchBody): Promise<SearchResponse> {
   return postJson<SearchResponse>("/api/search", body);
 }
 
-export function analyticsMentions(
-  term: string,
-  speaker?: string,
-): Promise<MentionsResponse> {
-  const qs = new URLSearchParams({ term });
-  if (speaker) qs.set("speaker", speaker);
-  return getJson<MentionsResponse>(`/api/analytics/mentions?${qs}`, true);
-}
-
-export function analyticsSpeakers(
-  term: string,
-  limit = 10,
-): Promise<SpeakersResponse> {
-  const qs = new URLSearchParams({ term, limit: String(limit) });
-  return getJson<SpeakersResponse>(`/api/analytics/speakers?${qs}`, true);
-}
-
-export function analyticsTranscripts(
-  term: string,
-  limit = 20,
-): Promise<TranscriptsResponse> {
-  const qs = new URLSearchParams({ term, limit: String(limit) });
-  return getJson<TranscriptsResponse>(`/api/analytics/transcripts?${qs}`, true);
-}
-
 // ---- /api/corpus ---------------------------------------------------------
 
 /** Whole-archive totals. Cheap enough to poll; `version` is the refresh key. */
@@ -172,6 +145,17 @@ export function getTrackTranscript(sourceFile: string): Promise<TrackTranscript>
   return getJson<TrackTranscript>(`/api/track/transcript?${qs}`, true);
 }
 
+/**
+ * Record one listen of a recording — feeds the best-sitting ranking's
+ * play-count signal. Fire-and-forget: callers ignore failures, playback
+ * never depends on this beacon.
+ */
+export function recordPlay(sourceFile: string): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>("/api/track/played", {
+    source_file: sourceFile,
+  });
+}
+
 // ---- /api/history --------------------------------------------------------
 
 export function listHistory(limit = 200): Promise<ConversationListResponse> {
@@ -183,8 +167,8 @@ export function getHistoryItem(id: string): Promise<ConversationRecord> {
   return getJson<ConversationRecord>(`/api/history/${encodeURIComponent(id)}`, true);
 }
 
-export function saveHistory(body: HistorySaveBody): Promise<ConversationRecord> {
-  return postJson<ConversationRecord>("/api/history", body);
+export function saveHistory(body: HistorySaveBody): Promise<ConversationTurn> {
+  return postJson<ConversationTurn>("/api/history", body);
 }
 
 export function deleteHistoryItem(id: string): Promise<{ ok: boolean; id: string }> {

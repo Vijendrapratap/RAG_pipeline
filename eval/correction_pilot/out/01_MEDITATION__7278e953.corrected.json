@@ -1,0 +1,16 @@
+{
+  "source_file": "Dagshai 2001_isolation/01 JAN - 2001_isolation/29 JAN - 630 AM_isolation/01 MEDITATION.cleaned.json",
+  "model": "qwen/qwen3.6-27b",
+  "chars_in": 210,
+  "repetition_score": 0.0,
+  "truncated": false,
+  "error": "",
+  "original_cleaned_text": "सब्सक्राइब करते हैं\nझाल\nझाल\nसब्सक्राइब करते हैं\nसब्सक्राइब करते हैं\nसब्सक्राइब करते हैं\nसब्सक्राइब करते हैं\nसब्सक्राइब करते हैं\nकर दो कर दो कर दो\nकरते हैं\nकर दो कर दो कर दो कर दो\nकर दो कर दो कर दो\nओम्गुरुवी नमः",
+  "conservative_text": "सब्सक्राइब करते हैं\nझाल\nसब्सक्राइब करते हैं\nकर दो\nकर दो\nॐ गुरुवे नमः",
+  "aggressive_text": "सब्सक्राइब करते हैं।\nसब्सक्राइब करते हैं।\nसब्सक्राइब करते हैं।\nसब्सक्राइब करते हैं।\nसब्सक्राइब करते हैं।\nकर दो, कर दो, कर दो।\nकरते हैं।\nकर दो, कर दो, कर दो, कर दो।\nकर दो, कर दो, कर दो।\nॐ गुरुवे नमः",
+  "usage": {
+    "prompt_tokens": 726,
+    "completion_tokens": 135,
+    "cost_usd": 0.000522
+  }
+}

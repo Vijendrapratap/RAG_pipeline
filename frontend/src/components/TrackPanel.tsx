@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError, getTrackTranscript } from "../api";
+import { ApiError, getTrackTranscript, recordPlay } from "../api";
 import type { TrackTranscript } from "../corpus";
 
 interface Props {
@@ -59,6 +59,9 @@ export function TrackPanel({ sourceFile, onAuthFail }: Props) {
   const [follow, setFollow] = useState(true);
   const [audioBroken, setAudioBroken] = useState(false);
   const [showCleaned, setShowCleaned] = useState(false);
+  // One play event per recording per panel open — `onPlay` also fires on
+  // resume-after-pause and after seeks, which are not new listens.
+  const playReported = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +69,7 @@ export function TrackPanel({ sourceFile, onAuthFail }: Props) {
     setError(null);
     setActive(-1);
     setAudioBroken(false);
+    playReported.current = false;
     (async () => {
       try {
         const t = await getTrackTranscript(sourceFile);
@@ -89,6 +93,14 @@ export function TrackPanel({ sourceFile, onAuthFail }: Props) {
     const i = activeIndex(data.segments, el.currentTime);
     setActive((prev) => (prev === i ? prev : i));
   }, [data]);
+
+  // Count the listen for the best-sitting ranking. Fire-and-forget: a failed
+  // beacon (auth hiccup, migration not applied) must never affect playback.
+  const onPlay = useCallback(() => {
+    if (playReported.current) return;
+    playReported.current = true;
+    void recordPlay(sourceFile).catch(() => {});
+  }, [sourceFile]);
 
   // Keep the spoken line on screen — unless the reader has scrolled away, in
   // which case yanking the list back under their cursor every quarter-second is
@@ -122,6 +134,7 @@ export function TrackPanel({ sourceFile, onAuthFail }: Props) {
           src={data.audio_url}
           controls
           preload="metadata"
+          onPlay={onPlay}
           onTimeUpdate={onTimeUpdate}
           onSeeked={onTimeUpdate}
           onError={() => setAudioBroken(true)}

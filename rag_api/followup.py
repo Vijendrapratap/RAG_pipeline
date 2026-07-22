@@ -26,6 +26,7 @@ from typing import Any
 import requests
 
 from rag_api.config import Settings
+from rag_api.ollama_chat import chat_text
 
 log = logging.getLogger("rag_api.followup")
 
@@ -91,33 +92,16 @@ class FollowupRewriter:
         if not history:
             return query
         prompt = build_rewrite_prompt(query, history)
-        try:
-            r = self._session.post(
-                f"{self.settings.ollama_url}/api/chat",
-                json={
-                    "model": self.settings.chat_model,
-                    "messages": [
-                        {"role": "system", "content": _REWRITE_SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "stream": False,
-                    # See module docstring — thinking-model pollution guard.
-                    "think": False,
-                    "options": {
-                        "temperature": 0.0,
-                        "num_ctx": 2048,
-                        "num_predict": 128,
-                    },
-                },
-                timeout=self.settings.chat_timeout_s,
-            )
-            r.raise_for_status()
-        except requests.RequestException as e:
-            log.warning("follow-up rewrite failed for %r: %s — raw query", query, e)
-            return query
-        content = ((r.json().get("message") or {}).get("content") or "").strip()
+        # think=False guard + request/error/unwrap plumbing live in chat_text;
+        # temperature 0 keeps the rewrite deterministic.
+        content = chat_text(
+            self._session, self.settings.ollama_url, self.settings.chat_model,
+            _REWRITE_SYSTEM, prompt,
+            timeout=self.settings.chat_timeout_s,
+            temperature=0.0, num_ctx=2048, num_predict=128,
+            log=log, label="follow-up rewrite", subject=query,
+        )
         if not content:
-            log.warning("follow-up rewrite returned empty for %r — raw query", query)
             return query
         # Models sometimes wrap the rewrite in quotes despite the instruction.
-        return content.strip().strip('"').strip("'").strip()
+        return content.strip('"').strip("'").strip()

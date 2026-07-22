@@ -1,0 +1,47 @@
+# Trim the build context. The rag-api image only needs frontend/, rag_api/,
+# pyproject.toml and README.md (see services/rag_api/Dockerfile). Everything
+# below is either large, secret, or regenerated inside the build — shipping it
+# to the daemon only slows the build down.
+
+# Vector store, Tantivy/PageIndex indexes, processed corpora — 266 MB, never COPYed.
+data
+
+# Version control history.
+.git
+.gitignore
+
+# Built/installed artifacts — the image builds its own.
+frontend/node_modules
+frontend/dist
+node_modules
+
+# Dev-only frontend override (the 5173 proxy target). Inert at build time, but
+# it has no business in the image context.
+frontend/.env.local
+frontend/.env.*.local
+
+# Secrets — never build them in. .env.example is intentionally NOT ignored.
+.env
+.env.*
+!.env.example
+
+# Python caches and local virtualenvs.
+**/__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.pytest_cache
+.ruff_cache
+
+# Editor / OS noise.
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docs and local overrides are not needed at runtime.
+docs
+*.md
+!README.md
+docker-compose.override.yml

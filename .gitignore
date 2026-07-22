@@ -15,8 +15,17 @@ eval/results/*.json
 # Model-comparison run outputs (generated; timestamped JSON/MD dumps)
 eval/compare_results/
 
-# Data and runtime state
-data/
+# Data and runtime state.
+# `data/*` rather than `data/`: git cannot re-include a file whose parent
+# directory is excluded, and the Phase 17 rule tables live here and must be
+# reviewable in a diff.
+data/*
+!data/normalize_rules.json
+!data/normalize_review.md
+!data/aliases.json
+!data/synonyms.json
+!data/gazetteer.json
+!data/gazetteer_review.md
 dead_letter/
 ingest_progress.sqlite
 ingest.log

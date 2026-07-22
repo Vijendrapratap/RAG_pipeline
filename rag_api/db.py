@@ -123,6 +123,27 @@ def get_filter_options(pg_dsn: str, statement_timeout_ms: int = 10_000) -> dict[
         conn.close()
 
 
+def record_play(pg_dsn: str, source_file: str) -> None:
+    """Insert one play event (dashboard track player, migration 004).
+
+    Feeds the best-sitting ranking's popularity signal. Raises on failure —
+    the endpoint maps errors to 502; the frontend fires-and-forgets, so a
+    failed beacon never breaks playback.
+    """
+    if not _PSYCOPG2_AVAILABLE:
+        raise RuntimeError("psycopg2 not installed — cannot record plays")
+    conn = psycopg2.connect(pg_dsn, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO play_events (source_file) VALUES (%s)",
+                (source_file,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _union(out: dict[str, list[Any]], key: str, extra: list[str]) -> None:
     """Merge `extra` into out[key], dedup'd and sorted. Used to fold the
     catalog's facet values into the transcript-derived ones."""

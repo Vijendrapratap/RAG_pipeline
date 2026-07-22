@@ -42,6 +42,14 @@ from pathlib import Path, PurePath
 
 PRIMARY_SPEAKER: str = "Swami ji"
 
+# A genuine second speaker. 113 SAMBODHAN titles name him; of those 38 name Swami
+# ji too. Only a title naming Rishi ji AND NOT Swami ji is stamped as his — a
+# dual-speaker track keeps the primary (Swami ji is legitimately present), the
+# same single-valued-field limitation that makes a two-type track 'combined'.
+SECOND_SPEAKER: str = "Rishi ji"
+_RISHI_JI = re.compile(r"\bRISHI\s*JI\b")
+_SWAMI_JI = re.compile(r"\bSWAMI\s*JI\b")
+
 # Track-type vocabulary. Keys are normalized (upper, single-spaced). Default
 # for unmatched titles is "bhajan" — i.e. anything that is not a recognized
 # activity type is assumed to be a song/bhajan track.
@@ -54,6 +62,24 @@ TRACK_TYPE_VOCAB: dict[str, str] = {
     "RETURN MUSIC": "music",
 }
 DEFAULT_TRACK_TYPE: str = "bhajan"
+
+# Every controlled value track_type_for can emit, for schema validation elsewhere.
+TRACK_TYPES: frozenset[str] = frozenset(TRACK_TYPE_VOCAB.values()) | {
+    DEFAULT_TRACK_TYPE, "qa", "session", "combined",
+}
+
+# Vocab keys ordered longest-first so "OM GURUVE NAMAH" is tried before any prefix
+# of it could match. Used by the head-anchored matcher below.
+_VOCAB_BY_LEN: tuple[tuple[str, str], ...] = tuple(
+    sorted(TRACK_TYPE_VOCAB.items(), key=lambda kv: -len(kv[0]))
+)
+
+# A vocab word at the HEAD of the title, followed by end-of-title, a separator
+# ( "(" or "-" ), or a bare trailing number. Anything else after the word means it
+# is part of a song lyric ("MEDITATION KI MASTIYON MEIN"), so the title stays a
+# bhajan. This is head-anchored on purpose: substring matching reclassifies that
+# song, and "MERI SHAM MEDITATION MEIN" (a song) has MEDITATION mid-title.
+_HEAD_TAIL = re.compile(r"\s*($|[(\-]|\d+\s*$)")
 
 # IMD-standard 4-season mapping for India. See PRD §6 Phase 12.
 SEASON_BY_MONTH: dict[int, str] = {
@@ -250,10 +276,55 @@ def season_for(d: date) -> str:
     return SEASON_BY_MONTH[d.month]
 
 
+def primary_speaker_for(title: str) -> str:
+    """The speaker to stamp, from the track title. Defaults to `PRIMARY_SPEAKER`.
+
+    Diarization is 0/9,335 corpus-wide (every chunk is stamped Swami ji), so the
+    title is the only speaker signal there is. A title naming ONLY Rishi ji (e.g.
+    `SAMBODHAN - RISHI JI`, 73 tracks) is his; a title naming both (38 tracks) keeps
+    Swami ji, because he is genuinely present and the field holds one value.
+    """
+    t = re.sub(r"\s+", " ", (title or "").upper())
+    if _RISHI_JI.search(t) and not _SWAMI_JI.search(t):
+        return SECOND_SPEAKER
+    return PRIMARY_SPEAKER
+
+
 def track_type_for(title: str) -> str:
-    """Map a track title to a controlled-vocab type. Unknown -> 'bhajan'."""
-    normalized = re.sub(r"\s+", " ", title.strip().upper())
-    return TRACK_TYPE_VOCAB.get(normalized, DEFAULT_TRACK_TYPE)
+    """Map a track title to a controlled-vocab type. Unknown -> 'bhajan'.
+
+    Head-anchored, not substring. Over the 9,335-track corpus this recovers 1,049
+    tracks the old exact-match dropped to 'bhajan' (4,212 -> 5,261 typed) while
+    reclassifying zero songs. Three carve-outs, checked before the vocab:
+
+    - a "QUES"/"QUESTION" prefix -> 'qa'      (209 tracks: audience Q&A)
+    - the substring "SITTING"    -> 'session' (83 tracks: COMPLETE SITTING ...)
+    - two or more distinct vocab TYPES present -> 'combined' (108 tracks; a
+      "SAMBODHAN & PRAVACHAN" is genuinely both an address and a discourse, and a
+      single-valued field cannot say so).
+
+    Only after those does a head-anchored vocab word decide the type.
+    """
+    t = re.sub(r"\s+", " ", title.strip().upper())
+    if not t:
+        return DEFAULT_TRACK_TYPE
+
+    if t.startswith("QUES"):  # QUESTION 1, QUES-01, QUES - 3
+        return "qa"
+    if "SITTING" in t:  # COMPLETE SITTING (SONY RECORDER), WELCOME SITTING
+        return "session"
+
+    types_present = {
+        typ for key, typ in TRACK_TYPE_VOCAB.items()
+        if re.search(rf"\b{re.escape(key)}\b", t)
+    }
+    if len(types_present) >= 2:
+        return "combined"
+
+    for key, typ in _VOCAB_BY_LEN:
+        if t == key or (t.startswith(key) and _HEAD_TAIL.match(t[len(key):])):
+            return typ
+    return DEFAULT_TRACK_TYPE
 
 
 def _to_24h(hour_12: int, meridiem: str) -> int:
@@ -418,6 +489,7 @@ def _parse_track(name: str, meta: PathMetadata) -> None:
         meta.track_title = stem.strip() or None
         if meta.track_title:
             meta.track_type = track_type_for(meta.track_title)
+            meta.primary_speaker = primary_speaker_for(meta.track_title)
         meta.parse_warnings.append(f"track: no leading number in {name!r}")
         return
     try:
@@ -426,6 +498,7 @@ def _parse_track(name: str, meta: PathMetadata) -> None:
         meta.parse_warnings.append(f"track: bad track number in {name!r}")
     meta.track_title = m.group("title").strip()
     meta.track_type = track_type_for(meta.track_title)
+    meta.primary_speaker = primary_speaker_for(meta.track_title)
 
 
 def parse_path(path: Path | str, base_dir: Path | str | None = None) -> PathMetadata:

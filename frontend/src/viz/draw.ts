@@ -17,25 +17,19 @@
  */
 import type { CState, CorpusNode } from "../corpus";
 import { STATE_COLOR, litRatio, nodeState } from "../corpus";
+import type { Viewport } from "./camera";
+import { toScreen } from "./camera";
 import type { Placed } from "./radialTree";
-
-export interface Viewport {
-  /** Pan, in layout units. */
-  x: number;
-  y: number;
-  scale: number;
-  /** CSS pixels. */
-  width: number;
-  height: number;
-}
 
 export interface DrawState {
   placed: Placed[];
   view: Viewport;
   hover: Placed | null;
   selected: Placed | null;
-  /** Paths whose children are currently expanded — drawn with a ring. */
-  expanded: Set<string>;
+  /** The open branch — `spineOf(focus)`. Its members show their children. */
+  open: ReadonlySet<string>;
+  /** Containers shallower than this always show their children, open or not. */
+  revealDepth: number;
   /** The opened cluster. Its subtree and its ancestry stay lit; the rest fades
    *  back, so "where am I" is answerable without reading a single label. */
   focus: string | null;
@@ -72,22 +66,6 @@ export function hexToRgba(hex: string, alpha: number): string {
   const h = hex.replace("#", "");
   const n = parseInt(h.length === 3 ? h.replace(/./g, (ch) => ch + ch) : h, 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-}
-
-/** Layout coords → CSS pixels. */
-export function toScreen(p: { x: number; y: number }, v: Viewport): { x: number; y: number } {
-  return {
-    x: (p.x - v.x) * v.scale + v.width / 2,
-    y: (p.y - v.y) * v.scale + v.height / 2,
-  };
-}
-
-/** CSS pixels → layout coords. The inverse; used to pick under the cursor. */
-export function toLayout(sx: number, sy: number, v: Viewport): { x: number; y: number } {
-  return {
-    x: (sx - v.width / 2) / v.scale + v.x,
-    y: (sy - v.height / 2) / v.scale + v.y,
-  };
 }
 
 /** The set to keep bright when hovering: the node, its ancestors, its children. */
@@ -127,8 +105,14 @@ function isVisible(p: Placed, v: Viewport, margin: number): boolean {
   return s.x > -margin && s.x < v.width + margin && s.y > -margin && s.y < v.height + margin;
 }
 
+/** A container is drawn open when its children are on screen — which is exactly
+ *  when `visibleNodes` reveals them. Keep the two rules spelled the same way. */
+function isOpen(p: Placed, open: ReadonlySet<string>, revealDepth: number): boolean {
+  return !p.node.is_leaf && (p.node.depth < revealDepth || open.has(p.node.path));
+}
+
 export function draw(ctx: CanvasRenderingContext2D, st: DrawState, dpr: number): void {
-  const { placed, view, hover, selected, expanded, focus, dark } = st;
+  const { placed, view, hover, selected, open, revealDepth, focus, dark } = st;
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, view.width, view.height);
@@ -209,11 +193,24 @@ export function draw(ctx: CanvasRenderingContext2D, st: DrawState, dpr: number):
       ctx.lineWidth = 2;
       ctx.strokeStyle = dark ? "#fff7ea" : "#221d14";
       ctx.stroke();
-    } else if (expanded.has(p.node.path) && !dimmed(p)) {
-      ctx.globalAlpha = 0.7;
-      ctx.lineWidth = 1.2;
-      ctx.strokeStyle = dark ? "rgba(255,247,234,0.55)" : "rgba(34,29,20,0.5)";
-      ctx.stroke();
+    } else if (!p.node.is_leaf && !dimmed(p)) {
+      if (isOpen(p, open, revealDepth)) {
+        // Open: the dot itself is ringed. You are looking at its contents.
+        ctx.globalAlpha = 0.7;
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = dark ? "rgba(255,247,234,0.55)" : "rgba(34,29,20,0.5)";
+        ctx.stroke();
+      } else if (rr > 3) {
+        // Closed: a ring held off the dot — "there is more inside". Without it a
+        // collapsed collection is indistinguishable from a childless one, and the
+        // reader has no way to know the map has anything left to show them.
+        ctx.globalAlpha = 0.32;
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = dark ? "rgba(255,247,234,0.5)" : "rgba(34,29,20,0.45)";
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, rr + 2.5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
   }
   ctx.globalAlpha = 1;
@@ -237,9 +234,13 @@ function drawLabels(
   for (const p of visible) {
     const rr = p.r * view.scale;
     const isFocus = p === hover || p === selected;
-    // A label is worth pixels when the dot is big, when the ring is sparse and
-    // zoomed in, or when the pointer is on it. Otherwise it is noise.
-    const worth = isFocus || rr > 9 || (p.node.depth <= 2 && view.scale > 0.42);
+    // Collections are always named. There are a few dozen of them, they are the
+    // whole of the first view, and an unlabelled disc of dots is a picture of an
+    // archive rather than a way into one. Below that a label is worth pixels when
+    // the dot is big, when the ring is sparse and zoomed in, or when the pointer
+    // is on it. Otherwise it is noise.
+    const worth = isFocus || p.node.depth <= 1 || rr > 9 ||
+      (p.node.depth === 2 && view.scale > 0.42);
     if (!worth) continue;
     if (keep && !keep.has(p) && !isFocus) continue;
 

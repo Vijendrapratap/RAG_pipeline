@@ -26,6 +26,7 @@ import requests
 
 from rag_api.config import Settings
 from rag_api.lang import detect_language, language_label
+from rag_api.ollama_chat import chat_text
 
 log = logging.getLogger("rag_api.expand")
 
@@ -66,41 +67,16 @@ class QueryExpander:
 
         Failure is deliberately non-fatal: query expansion is an enhancement,
         so an unreachable / slow chat model degrades to query-only retrieval
-        rather than failing the request.
+        rather than failing the request. The `think=False` guard and the
+        request/error/unwrap plumbing live in `ollama_chat.chat_text`; a short
+        passage caps context and output so expansion stays cheap.
         """
-        lang = detect_language(query)
-        prompt = build_hyde_prompt(query, language_label(lang))
-        try:
-            r = self._session.post(
-                f"{self.settings.ollama_url}/api/chat",
-                json={
-                    "model": self.settings.chat_model,
-                    "messages": [
-                        {"role": "system", "content": _HYDE_SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "stream": False,
-                    # think=False: chat_model (qwen3.5:9b) is a thinking model;
-                    # without this it prepends a reasoning chain that pollutes the
-                    # hypothetical passage and degrades the very embedding HyDE is
-                    # meant to sharpen. Safe on non-thinking models too. Same
-                    # gotcha fixed in pageindex.py / the enrichment path.
-                    "think": False,
-                    # A hypothetical passage is short — cap context and output
-                    # so expansion stays cheap relative to answer generation.
-                    "options": {
-                        "temperature": self.settings.chat_temperature,
-                        "num_ctx": 2048,
-                        "num_predict": 256,
-                    },
-                },
-                timeout=self.settings.chat_timeout_s,
-            )
-            r.raise_for_status()
-        except requests.RequestException as e:
-            log.warning("HyDE expansion failed for %r: %s — query-only", query, e)
-            return ""
-        content = ((r.json().get("message") or {}).get("content") or "").strip()
-        if not content:
-            log.warning("HyDE expansion returned empty content for %r", query)
-        return content
+        prompt = build_hyde_prompt(query, language_label(detect_language(query)))
+        return chat_text(
+            self._session, self.settings.ollama_url, self.settings.chat_model,
+            _HYDE_SYSTEM, prompt,
+            timeout=self.settings.chat_timeout_s,
+            temperature=self.settings.chat_temperature,
+            num_ctx=2048, num_predict=256,
+            log=log, label="HyDE expansion", subject=query,
+        )

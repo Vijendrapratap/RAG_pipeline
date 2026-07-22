@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from rag_api.config import Settings
 from rag_api.route import (
-    ANALYTIC, FOLLOWUP, NAME, QUOTE, THEMATIC, classify, route,
+    ANALYTIC, CHITCHAT, FOLLOWUP, NAME, QUOTE, THEMATIC, classify, is_chitchat,
+    route,
 )
 
 # A long, mostly-Devanagari verbatim passage (no name cue) — the quote shape.
@@ -14,6 +15,72 @@ QUOTE_PASSAGE = (
     "में, कोई परवाह नहीं, उसे कुछ मालूम नहीं, दिवानीगी है, शिकर है, "
     "वो अपने महबूब की गली का दिवाना है"
 )
+
+
+# ---- chitchat --------------------------------------------------------------
+
+def test_chitchat_greetings_classify_as_chitchat():
+    for q in ["hi", "Hello!", "hey", "namaste 🙏", "Namaste ji",
+              "how are you", "how are you?", "कैसे हैं आप", "नमस्ते",
+              "thanks ji", "धन्यवाद", "who are you", "what can you do",
+              "tum kaun ho"]:
+        assert classify(q) == CHITCHAT, q
+
+
+def test_chitchat_elongations_match():
+    for q in ["hiii", "Hellooo", "heyyyy", "yoo"]:
+        assert is_chitchat(q), q
+
+
+def test_chitchat_never_swallows_real_questions():
+    # Queries that CONTAIN a pleasantry word but are corpus lookups.
+    for q in [
+        "how are thoughts stilled in meditation",
+        "hi swami ji ne dhyan ke baare mein kya kaha",
+        "what does swami ji say about gratitude",
+        "ध्यान कैसे करना चाहिए स्वामी जी",
+    ]:
+        assert classify(q) != CHITCHAT, q
+
+
+def test_chitchat_composed_greeting_meta_combinations():
+    # Combined / reordered pleasantries the exact set misses (2026-07-15):
+    # every token non-content + one assistant-addressed anchor.
+    for q in [
+        "hi hello what you can do",
+        "Hello can you help me",
+        "hi what can you do for me",
+        "are you there",
+        "hii hello ji",
+        "क्या आप मदद कर सकते हैं",
+    ]:
+        assert classify(q) == CHITCHAT, q
+
+
+def test_chitchat_composed_rule_requires_content_free_query():
+    # One content word — or a missing assistant anchor — defeats the composed
+    # rule; follow-up anaphora ("that", "more") stays out of the vocabulary so
+    # continuations still reach the followup class.
+    for q in [
+        "what do the sittings say about rain",
+        "can you tell me about kabir",
+        "what is dhyan",
+        "hi swami ji ne kya kaha",
+        "what about that",
+        "tell me more",
+    ]:
+        assert classify(q) != CHITCHAT, q
+
+
+def test_chitchat_route_disables_retrieval():
+    s = get_settings()
+    d = route("hi", s)
+    assert d.query_class == CHITCHAT
+    assert d.retrieve is False
+    assert d.find_quote is False
+    # Every retrieval class keeps retrieve=True.
+    assert route("पुरन सिंह के बारे में क्या कहा", s).retrieve is True
+    assert route(QUOTE_PASSAGE, s).retrieve is True
 
 
 # ---- quote ---------------------------------------------------------------
@@ -54,6 +121,20 @@ def test_name_suffix_subject():
 
 def test_name_seed_person_romanized():
     assert classify("who was Swami Rama Tirtha and what did he teach") == NAME
+
+
+def test_name_romanized_subject_with_cue():
+    # The live gap this rule closes: romanized (Hinglish) person lookups used
+    # to fall through to thematic because every cue was Devanagari-only.
+    assert classify("puran singh ke baare mein") == NAME
+    assert classify("swami ji ne puran singh ke bare me kya kaha") == NAME
+    assert classify("chetan vishwas ki katha") == NAME
+
+
+def test_name_romanized_concept_stays_thematic():
+    # Structurally identical, but the subject is a (romanized) concept.
+    assert classify("dhyan ke baare mein kya kaha") == THEMATIC
+    assert classify("prem aur bhakti ke bare me") == THEMATIC
 
 
 def test_swami_ji_honorific_alone_is_not_a_name_signal():
